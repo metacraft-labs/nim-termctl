@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just lint
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-logs
+          path: test-logs/
+          retention-days: 30
+
+  test:
+    name: Test (orc/release/threads:on)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just test
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: test-logs/
+          retention-days: 30
+
+  charter-matrix:
+    name: Charter (${{ matrix.mm }}/${{ matrix.mode }}/threads:${{ matrix.threads }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mm: [arc, orc, refc]
+        mode: [debug, release, danger]
+        threads: [on, off]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just _matrix ${{ matrix.mm }} ${{ matrix.mode }} ${{ matrix.threads }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: charter-${{ matrix.mm }}-${{ matrix.mode }}-${{ matrix.threads }}-logs
+          path: test-logs/
+          retention-days: 30
+
+  sanitizers:
+    name: Sanitizer (${{ matrix.kind }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [asan, ubsan, tsan, lsan]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just test-${{ matrix.kind }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-${{ matrix.kind }}-logs
+          path: test-logs/
+          retention-days: 30
+
+  valgrind:
+    name: Valgrind
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just test-valgrind
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valgrind-logs
+          path: test-logs/
+          retention-days: 30
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just test
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-logs
+          path: test-logs/
+          retention-days: 30
+
+  test-leaks-heavy:
+    name: Heavy leak budgets (100k cycles)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just test-leaks-heavy
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leaks-heavy-logs
+          path: test-logs/
+          retention-days: 30
+
+  nix-build:
+    name: nix build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix build .#default

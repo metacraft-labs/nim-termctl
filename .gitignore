@@ -1,0 +1,17 @@
+.direnv/
+.pre-commit-config.yaml
+nimcache/
+nim-cache/
+result
+result-*
+test-logs/
+tests/test_*
+!tests/*.nim
+!tests/*.nims
+!tests/test_helpers
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj

@@ -1,0 +1,40 @@
+# Valgrind suppressions for nim-termctl's test suite.
+#
+# These suppress *known* allocator-side leaks that originate from Nim's
+# stdlib (unittest, runtime initialization), not from nim-termctl itself.
+# When Nim ships a fix upstream, drop the corresponding entry.
+
+# Nim 2.2's unittest formatter allocates a default console formatter once at
+# startup and never frees it. Reachable on exit, not a leak from our code.
+{
+   nim_unittest_defaultConsoleFormatter
+   Memcheck:Leak
+   match-leak-kinds: possible,reachable
+   fun:calloc
+   ...
+   fun:nimNewObj
+   ...
+   fun:*defaultConsoleFormatter*
+}
+
+# unittest.ensureInitialized allocates the formatters seq.
+{
+   nim_unittest_ensureInitialized
+   Memcheck:Leak
+   match-leak-kinds: possible,reachable
+   fun:calloc
+   ...
+   fun:newSeqPayload
+   fun:*ensureInitialized*
+}
+
+# Nim runtime - internal allocator state initialised at startup, freed at
+# exit by the OS. Valgrind sees it as still-reachable; not our concern.
+{
+   nim_runtime_init_allocator
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   ...
+   fun:NimMainModule
+}
