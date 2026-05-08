@@ -591,9 +591,32 @@ proc feed*(p: var Parser; bytes: openArray[byte]) =
       else:
         # Parameter / intermediate byte.
         p.buf.add char(b)
-        # Reissue-on-overlength: if the buffer grows past a sanity limit
-        # without finding a final, give up and drop into ground.
-        if p.buf.len > 256:
+        # Reissue-on-overlength: if the CSI body grows past the
+        # sanity limit (32 bytes, per Textual's `_xterm_parser`) without
+        # finding a final byte, the input is malformed or non-CSI.
+        # Re-emit the buffered prefix as per-character key events
+        # (skipping the leading `[` already consumed by `psEscaped`)
+        # so callers see the bytes instead of silent loss.
+        const csiReissueLimit = 32
+        if p.buf.len > csiReissueLimit:
+          # Synthesise an ESC keypress for the original ESC byte, then
+          # re-feed `[` and every accumulated parameter byte as plain
+          # printable / control characters.
+          emitKey(p, keyOf(kcEsc))
+          # Re-dispatch the `[` and the buffered bytes through the
+          # ground-state path, mirroring Textual's reissue. We can't
+          # call `feed` recursively without re-entering the CSI state;
+          # instead, emit each byte as a char key (this is the
+          # documented fallback path).
+          emitKey(p, keyChar(Rune(int('['))))
+          for ch in p.buf:
+            let cb = byte(ch)
+            if cb >= 0x20'u8 and cb < 0x7F'u8:
+              emitKey(p, keyChar(Rune(int(cb))))
+            elif cb < 0x20'u8:
+              dispatchControl(p, cb)
+            # Bytes >= 0x80 inside an unterminated CSI parameter list
+            # are unusual; drop them rather than emit a corrupt rune.
           transitionToGround(p)
     of psSs3:
       dispatchSs3(p, char(b))
