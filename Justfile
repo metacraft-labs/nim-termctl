@@ -20,7 +20,19 @@ nim-flags := "--skipParentCfg --skipUserCfg --styleCheck:usages --styleCheck:err
 
 # The ordered list of test files. Adding a new test_*.nim here gates it
 # on CI.
-tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim"
+#
+# The =test_windows_*= files are gated with =when defined(windows)=:
+# on Linux they compile to a "skipped" suite (still a real compile) so
+# that the Linux matrix catches Windows-side regressions to test
+# scaffolding; on the `windows-latest` lane (=test-windows= recipe) the
+# guards drop and the real-stack assertions execute.
+tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim"
+
+# Windows-only tests are now part of the main `tests` list (guarded with
+# `when defined(windows)`). The `windows-tests` variable is kept for
+# documentation / test-windows recipe symmetry but currently mirrors a
+# subset of `tests`.
+windows-tests := "tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim"
 
 # --- Default targets (per repo-requirements.md) ---
 
@@ -209,3 +221,46 @@ test-readme:
     @mkdir -p test-logs
     nim check {{nim-flags}} {{src-paths}} --mm:orc \
       tests/smoke.nim 2>&1 | tee test-logs/readme.log
+
+# --- Windows lane ---
+#
+# `check-windows-cross` cross-checks the Windows code path from a Linux
+# host using `nim --os:windows`. This does NOT need a mingw cross
+# compiler - Nim's frontend (lexer, parser, semantic check) runs to
+# completion before the C compiler is invoked, so all the Windows-only
+# imports (kernel32 procs, etc.) are validated.
+#
+# The Linux POSIX-only tests (e.g. =test_termctl_raw_mode_round_trip=)
+# import =std/posix= unconditionally and therefore can't be checked
+# under =--os:windows= - they are excluded from this recipe. CI's
+# `windows-latest` lane (=just test-windows=) below actually executes
+# the cross-platform tests + the Windows-only signal tests on a real
+# Windows runner.
+check-windows-cross:
+    @mkdir -p test-logs
+    nim check {{nim-flags}} {{src-paths}} --os:windows --mm:orc \
+      src/nim_termctl.nim 2>&1 | tee test-logs/check-windows-cross.log
+    @echo "[windows-cross-check] tests/test_windows_signals_compile.nim"
+    nim check {{nim-flags}} {{src-paths}} --os:windows --mm:orc \
+      tests/test_windows_signals_compile.nim 2>&1 | \
+      tee -a test-logs/check-windows-cross.log
+    @for t in {{windows-tests}}; do \
+      echo "[windows-cross-check] $t"; \
+      nim check {{nim-flags}} {{src-paths}} --os:windows --mm:orc \
+        $t 2>&1 | tee -a test-logs/check-windows-cross.log; \
+    done
+
+# Native Windows lane - run on `windows-latest` in CI. Builds and runs
+# the Linux-portable test list AND the Windows-only signal tests.
+test-windows:
+    @mkdir -p test-logs
+    @for t in {{tests}}; do \
+      echo "[windows] $t"; \
+      nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        -r $t 2>&1 | tee -a test-logs/windows.log; \
+    done
+    @for t in {{windows-tests}}; do \
+      echo "[windows-only] $t"; \
+      nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        -r $t 2>&1 | tee -a test-logs/windows.log; \
+    done

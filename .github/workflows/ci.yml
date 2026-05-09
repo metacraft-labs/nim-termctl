@@ -118,6 +118,46 @@ jobs:
           path: test-logs/
           retention-days: 30
 
+  # Cross-compile gate run from a Linux host: `nim --os:windows` parses
+  # and type-checks the Windows code path. Catches Windows-side
+  # regressions early without waiting on the (slower) Windows runner.
+  check-windows-cross:
+    name: Check (Windows cross from Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: nix develop --command just check-windows-cross
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-windows-cross-logs
+          path: test-logs/
+          retention-days: 30
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.4'
+      - name: Install just
+        run: choco install just -y
+      - name: Run Windows test lane
+        run: just test-windows
+        shell: cmd
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-logs
+          path: test-logs/
+          retention-days: 30
+
   test-leaks-heavy:
     name: Heavy leak budgets (100k cycles)
     if: github.ref == 'refs/heads/main'

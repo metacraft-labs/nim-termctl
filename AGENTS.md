@@ -61,7 +61,7 @@ src/
   nim_termctl/queue.nim                 # queue/execute templates batching writes
   nim_termctl/parser.nim                # byte-stream -> typed-event parser
   nim_termctl/posix_backend.nim         # POSIX backend - termios, signals, SIGWINCH self-pipe
-  nim_termctl/windows_backend.nim       # Windows backend - GetConsoleMode/SetConsoleMode (stub-ready)
+  nim_termctl/windows_backend.nim       # Windows backend - GetConsoleMode/SetConsoleMode + SetConsoleCtrlHandler + WINDOW_BUFFER_SIZE_EVENT drain
 tests/
   test_termctl_raw_mode_round_trip.nim  # L3 spec test
   test_termctl_alt_screen_round_trip.nim
@@ -71,6 +71,9 @@ tests/
   test_termctl_sigwinch_resize.nim
   test_termctl_no_leaks.nim             # charter leak-budget suite
   test_api_invariants.nim               # charter §1 API rules
+  test_windows_signals_compile.nim      # cross-platform compile gate for Win32 signals
+  test_windows_ctrl_c_handler.nim       # Windows-only: SetConsoleCtrlHandler runtime test
+  test_windows_window_resize.nim        # Windows-only: WINDOW_BUFFER_SIZE_EVENT drain test
   test_helpers.nim                      # shared utilities (no test_ prefix -> not run on its own)
 .github/workflows/ci.yml                # full charter matrix on every PR
 flake.nix                               # nix devShell + checks

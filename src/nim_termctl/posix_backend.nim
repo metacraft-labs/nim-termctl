@@ -152,10 +152,32 @@ proc restoreTerminalSafe() {.cdecl.} =
   if gActiveTty >= 0:
     discard tcSetAttr(gActiveTty, TCSAFLUSH, addr gSavedTermios)
 
+type
+  CtrlCallback* = proc () {.gcsafe.}
+    ## User-supplied Ctrl-C / Ctrl-Break notification callback. Mirrors
+    ## the Windows-side surface (=signals_windows.nim=) so cross-platform
+    ## consumers register a single shape regardless of OS. On POSIX the
+    ## callback is dispatched from the SIGINT / SIGTERM signal handler,
+    ## so it MUST be async-signal-safe: no Nim allocation, no I/O beyond
+    ## =write(2)= / =setEvent= equivalents. Most callers should just push
+    ## a token into a self-pipe.
+
+var
+  gCtrlCallback {.threadvar.}: CtrlCallback
+  gCtrlEventReceived {.threadvar.}: bool
+
 proc onSignal(sig: cint) {.noconv.} =
-  ## Signal handler. Restore terminal state, re-raise the signal with the
+  ## Signal handler. Restore terminal state, dispatch the user's Ctrl-C
+  ## callback if one is registered, then re-raise the signal with the
   ## default action so the process actually dies the way it would have.
   restoreTerminalSafe()
+  gCtrlEventReceived = true
+  let cb = gCtrlCallback
+  if cb != nil:
+    try:
+      cb()
+    except CatchableError:
+      discard
   # Reset to default and re-raise so default action (terminate) runs.
   var sa = Sigaction()
   sa.sa_handler = SIG_DFL
@@ -175,6 +197,42 @@ proc installSignalHandlers() =
   discard sigaction(SIGTERM, sa, nil)
   discard sigaction(SIGHUP, sa, nil)
   discard sigaction(SIGQUIT, sa, nil)
+
+proc installCtrlCHandler*(callback: CtrlCallback) =
+  ## POSIX-side parity surface for the Windows =installCtrlCHandler=. On
+  ## POSIX the underlying signals are SIGINT / SIGTERM / SIGHUP /
+  ## SIGQUIT (which the existing =installSignalHandlers= already wires
+  ## up); this proc just slots the user callback into the same handler.
+  ##
+  ## Idempotent: calling it twice replaces the callback in place and
+  ## does not re-register the underlying =sigaction=.
+  gCtrlCallback = callback
+  installSignalHandlers()
+
+proc uninstallCtrlCHandler*() =
+  ## Drop the user callback and reset the SIG_DFL sigactions for the
+  ## four signals we manage. Intended for tests; production code rarely
+  ## needs to uninstall (process is exiting).
+  gCtrlCallback = nil
+  if not gSigHandlersInstalled: return
+  gSigHandlersInstalled = false
+  var sa = Sigaction()
+  sa.sa_handler = SIG_DFL
+  discard sigemptyset(sa.sa_mask)
+  sa.sa_flags = 0
+  discard sigaction(SIGINT, sa, nil)
+  discard sigaction(SIGTERM, sa, nil)
+  discard sigaction(SIGHUP, sa, nil)
+  discard sigaction(SIGQUIT, sa, nil)
+
+proc ctrlEventReceived*(): bool {.inline.} =
+  ## True if a Ctrl-C / SIGINT / SIGTERM handler has fired since the last
+  ## reset. Mirrors the Windows surface for cross-platform tests.
+  gCtrlEventReceived
+
+proc resetCtrlEventReceived*() {.inline.} =
+  ## Clear the =ctrlEventReceived= flag. Tests call this between cases.
+  gCtrlEventReceived = false
 
 proc atexitTrampoline() {.cdecl.} =
   restoreTerminalSafe()

@@ -22,23 +22,26 @@
 when not defined(windows):
   {.error: "windows_backend.nim is for Windows only - use posix_backend.nim".}
 
-import std/[oserrors]
+import std/[atomics]
 
 # ---------------------------------------------------------------------------
 # Win32 FFI - minimal subset.
 # ---------------------------------------------------------------------------
 
 type
-  HANDLE = pointer
+  HANDLE* = pointer
   DWORD = uint32
   BOOL = int32
   WORD = uint16
   SHORT = int16
+  WCHAR = uint16
 
 const
   STD_INPUT_HANDLE = DWORD(-10'i32)
   STD_OUTPUT_HANDLE = DWORD(-11'i32)
   INVALID_HANDLE_VALUE = cast[HANDLE](-1)
+  TRUE = BOOL(1)
+  FALSE = BOOL(0)
 
   ENABLE_PROCESSED_INPUT = DWORD(0x0001)
   ENABLE_LINE_INPUT = DWORD(0x0002)
@@ -49,6 +52,25 @@ const
   ENABLE_PROCESSED_OUTPUT = DWORD(0x0001)
   ENABLE_VIRTUAL_TERMINAL_PROCESSING = DWORD(0x0004)
   DISABLE_NEWLINE_AUTO_RETURN = DWORD(0x0008)
+
+  # Console control event types (passed to SetConsoleCtrlHandler callback).
+  CTRL_C_EVENT* = DWORD(0)
+  CTRL_BREAK_EVENT* = DWORD(1)
+  CTRL_CLOSE_EVENT* = DWORD(2)
+  CTRL_LOGOFF_EVENT* = DWORD(5)
+  CTRL_SHUTDOWN_EVENT* = DWORD(6)
+
+  # WaitForSingleObject return codes.
+  WAIT_OBJECT_0 = DWORD(0x00000000)
+  WAIT_TIMEOUT = DWORD(0x00000102)
+  WAIT_FAILED = DWORD(0xFFFFFFFF'u32)
+
+  # ReadConsoleInput record types.
+  KEY_EVENT = WORD(0x0001)
+  MOUSE_EVENT = WORD(0x0002)
+  WINDOW_BUFFER_SIZE_EVENT* = WORD(0x0004)
+  MENU_EVENT = WORD(0x0008)
+  FOCUS_EVENT = WORD(0x0010)
 
 type
   CoordC {.importc: "COORD", header: "<windows.h>", pure, final.} = object
@@ -81,6 +103,112 @@ proc setConsoleMode(hConsole: HANDLE; mode: DWORD): BOOL
 proc getConsoleScreenBufferInfo(hConsole: HANDLE;
                                 info: ptr ConsoleScreenBufferInfoC): BOOL
   {.importc: "GetConsoleScreenBufferInfo", header: "<windows.h>", stdcall.}
+
+# Console control handler: SetConsoleCtrlHandler installs a callback that
+# Windows invokes when the user hits Ctrl+C / Ctrl+Break, when the console
+# is being closed, or at logoff/shutdown. The handler returns TRUE to
+# indicate it consumed the event, or FALSE to fall through to the next
+# registered handler / default behavior.
+type
+  PHandlerRoutine = proc (eventType: DWORD): BOOL {.stdcall.}
+
+proc setConsoleCtrlHandler(handler: PHandlerRoutine; add: BOOL): BOOL
+  {.importc: "SetConsoleCtrlHandler", header: "<windows.h>", stdcall.}
+
+proc generateConsoleCtrlEvent*(eventType: DWORD; processGroupId: DWORD): BOOL
+  {.importc: "GenerateConsoleCtrlEvent", header: "<windows.h>", stdcall.}
+  ## Programmatically raise a CTRL_C_EVENT or CTRL_BREAK_EVENT. Used by
+  ## tests; also available to user code that wants to fire-trigger the
+  ## same path the user would.
+
+# Manual-reset event - the Win32 self-pipe equivalent. SetEvent flips it
+# signaled (atomic, signal-handler-safe per MSDN); WaitForSingleObject
+# wakes; ResetEvent flips it back.
+proc createEventW(lpEventAttributes: pointer;
+                  bManualReset, bInitialState: BOOL;
+                  lpName: ptr WCHAR): HANDLE
+  {.importc: "CreateEventW", header: "<windows.h>", stdcall.}
+
+proc setEvent(hEvent: HANDLE): BOOL
+  {.importc: "SetEvent", header: "<windows.h>", stdcall.}
+
+proc resetEvent(hEvent: HANDLE): BOOL
+  {.importc: "ResetEvent", header: "<windows.h>", stdcall.}
+
+proc closeHandle(hObject: HANDLE): BOOL
+  {.importc: "CloseHandle", header: "<windows.h>", stdcall.}
+
+proc waitForSingleObject(hHandle: HANDLE; dwMilliseconds: DWORD): DWORD
+  {.importc: "WaitForSingleObject", header: "<windows.h>", stdcall.}
+
+# Console input record decoding. We only need WINDOW_BUFFER_SIZE_RECORD;
+# the other variants are present to make the union (=INPUT_RECORD=) the
+# right size when we walk an array of them.
+type
+  KeyEventRecordC {.importc: "KEY_EVENT_RECORD", header: "<windows.h>",
+                    pure, final.} = object
+    bKeyDown: BOOL
+    wRepeatCount: WORD
+    wVirtualKeyCode: WORD
+    wVirtualScanCode: WORD
+    uChar: WORD  # union of WCHAR/AsciiChar - we don't decode here
+    dwControlKeyState: DWORD
+
+  MouseEventRecordC {.importc: "MOUSE_EVENT_RECORD", header: "<windows.h>",
+                      pure, final.} = object
+    dwMousePosition: CoordC
+    dwButtonState: DWORD
+    dwControlKeyState: DWORD
+    dwEventFlags: DWORD
+
+  WindowBufferSizeRecordC {.importc: "WINDOW_BUFFER_SIZE_RECORD",
+                            header: "<windows.h>", pure, final.} = object
+    dwSize: CoordC
+
+  MenuEventRecordC {.importc: "MENU_EVENT_RECORD", header: "<windows.h>",
+                     pure, final.} = object
+    dwCommandId: DWORD
+
+  FocusEventRecordC {.importc: "FOCUS_EVENT_RECORD", header: "<windows.h>",
+                      pure, final.} = object
+    bSetFocus: BOOL
+
+  InputRecordC {.importc: "INPUT_RECORD", header: "<windows.h>",
+                 pure, final.} = object
+    EventType: WORD
+    # Padding/union - we don't need to decode the union members in pure
+    # Nim; we only read EventType + the dwSize field for buffer-size
+    # events, which lives at a known offset. The C struct definition
+    # `pure` flag tells Nim to use sizeof from <windows.h> directly.
+    Event: KeyEventRecordC  # acts as a sized payload; INPUT_RECORD uses
+                            # union semantics in C and KEY_EVENT_RECORD
+                            # is the largest member, so this matches the
+                            # union footprint.
+
+proc readConsoleInputW(hConsoleInput: HANDLE;
+                       lpBuffer: ptr InputRecordC;
+                       nLength: DWORD;
+                       lpNumberOfEventsRead: ptr DWORD): BOOL
+  {.importc: "ReadConsoleInputW", header: "<windows.h>", stdcall.}
+
+proc peekConsoleInputW(hConsoleInput: HANDLE;
+                       lpBuffer: ptr InputRecordC;
+                       nLength: DWORD;
+                       lpNumberOfEventsRead: ptr DWORD): BOOL
+  {.importc: "PeekConsoleInputW", header: "<windows.h>", stdcall.}
+
+proc getNumberOfConsoleInputEvents(hConsoleInput: HANDLE;
+                                   lpcNumberOfEvents: ptr DWORD): BOOL
+  {.importc: "GetNumberOfConsoleInputEvents", header: "<windows.h>", stdcall.}
+
+proc setConsoleScreenBufferSize(hConsoleOutput: HANDLE; dwSize: CoordC): BOOL
+  {.importc: "SetConsoleScreenBufferSize", header: "<windows.h>", stdcall.}
+
+proc writeConsoleInputW(hConsoleInput: HANDLE;
+                        lpBuffer: ptr InputRecordC;
+                        nLength: DWORD;
+                        lpNumberOfEventsWritten: ptr DWORD): BOOL
+  {.importc: "WriteConsoleInputW", header: "<windows.h>", stdcall.}
 
 # ---------------------------------------------------------------------------
 # Errors and stubs for ConPTY.
@@ -264,24 +392,231 @@ proc cursorPositionFromBuffer*(): tuple[col, row: int] =
             row: int(info.dwCursorPosition.y))
 
 # ---------------------------------------------------------------------------
-# SIGWINCH-equivalent stubs.
+# Console control handling: Ctrl-C, Ctrl-Break, window-buffer-size
+# events. The Windows analogue of POSIX signals + SIGWINCH self-pipe.
 # ---------------------------------------------------------------------------
 #
-# Windows reports console resizes as `WINDOW_BUFFER_SIZE_EVENT` records on
-# the input handle when `ENABLE_WINDOW_INPUT` is set; the real decoding
-# lives in the deferred ConPTY work. For now we expose the same
-# `installWinchHandler` / `winchPipeReadFd` / `drainWinchPipe` API so
-# cross-platform code compiles, with a TODO marker.
+# Strategy:
+#   * `SetConsoleCtrlHandler` registers a single C-callable entry point.
+#     The entry point runs in a *separate thread* (Windows spawns one for
+#     every CTRL_*_EVENT). MSDN explicitly documents `SetEvent` as safe
+#     to call from this context, so the handler signals a manual-reset
+#     event and returns TRUE to consume the event (preventing the
+#     default-terminate behaviour).
+#   * The user's typed callback is dispatched from the *same* handler
+#     thread. Callers must keep that callback short and reentrancy-aware
+#     (no allocation-heavy work; queue something into the event loop).
+#   * `WINDOW_BUFFER_SIZE_EVENT` is consumed via `PeekConsoleInputW` /
+#     `ReadConsoleInputW`: the polling loop drains pending records,
+#     coalesces multiple resizes into the latest size, and signals the
+#     same manual-reset event so the main wait wakes up.
+#
+# Public surface (mirrors the POSIX side):
+#   * `installCtrlCHandler(callback)` -> POSIX equivalent of
+#     installSignalHandlers (which catches SIGINT/SIGTERM/SIGHUP/SIGQUIT
+#     internally; on Windows the comparable surface is
+#     CTRL_C_EVENT/CTRL_BREAK_EVENT/CTRL_CLOSE_EVENT etc.)
+#   * `installWinchHandler` -> compatibility name; on Windows it ensures
+#     the input handle has ENABLE_WINDOW_INPUT set so resize records
+#     reach `pollWindowBufferSize`.
+#   * `signalEventHandle()` -> Win32 equivalent of `winchPipeReadFd`. The
+#     event loop calls `WaitForMultipleObjects` on this + the input
+#     handle.
+#   * `pollWindowBufferSize()` -> drains pending WINDOW_BUFFER_SIZE
+#     records and returns the new (cols, rows) if any.
+#   * `winchPipeReadFd` / `drainWinchPipe` are kept (returning -1 / no-op)
+#     so cross-platform consumers compile unchanged.
+
+type
+  CtrlCallback* = proc () {.gcsafe.}
+    ## User callback fired from the Win32 control-handler thread. Must be
+    ## reentrant and async-signal-safe in spirit (no Nim allocation,
+    ## no I/O beyond the bare minimum). Most callers should just push a
+    ## token into a thread-safe queue.
+
+var
+  gSignalEvent {.threadvar.}: HANDLE
+  gCtrlHandlerInstalled: Atomic[bool]
+  gCtrlCallback: CtrlCallback
+  gCtrlEventReceived: Atomic[bool]
+    ## Set to true when the handler fires. Tests poll this to verify the
+    ## handler ran without racing the wait.
+  gWinchHandlerInstalledWindows {.threadvar.}: bool
+  gSavedInputModeForWinch {.threadvar.}: DWORD
+
+proc consoleCtrlHandler(eventType: DWORD): BOOL {.stdcall.} =
+  ## Win32 control handler. Runs on a dedicated thread spawned by the
+  ## OS; we keep work to a minimum: signal the wakeup event, then call
+  ## the user's typed callback if one is registered.
+  ##
+  ## Return TRUE so Windows treats the event as consumed (otherwise the
+  ## default action - process termination on CTRL_C_EVENT - runs).
+  case eventType
+  of CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT,
+     CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT:
+    gCtrlEventReceived.store(true)
+    if gSignalEvent != nil and gSignalEvent != INVALID_HANDLE_VALUE:
+      discard setEvent(gSignalEvent)
+    let cb = gCtrlCallback
+    if cb != nil:
+      try:
+        cb()
+      except CatchableError:
+        discard
+    result = TRUE
+  else:
+    result = FALSE
+
+proc installCtrlCHandler*(callback: CtrlCallback) =
+  ## Register a Ctrl-C / Ctrl-Break / console-close handler. Idempotent
+  ## w.r.t. the underlying SetConsoleCtrlHandler registration: a second
+  ## call replaces the callback in place.
+  ##
+  ## The callback fires on a thread Windows spawns; do not block in it.
+  gCtrlCallback = callback
+  if not gCtrlHandlerInstalled.exchange(true):
+    if gSignalEvent == nil:
+      gSignalEvent = createEventW(nil, TRUE, FALSE, nil)
+    if setConsoleCtrlHandler(consoleCtrlHandler, TRUE) == FALSE:
+      # Roll back the flag so a retry has a chance.
+      gCtrlHandlerInstalled.store(false)
+      raise newException(TermctlError,
+        "SetConsoleCtrlHandler(install) failed")
+
+proc uninstallCtrlCHandler*() =
+  ## Unregister the previously-installed Ctrl-C handler. Closes the
+  ## signal event and clears the saved callback. Idempotent.
+  if not gCtrlHandlerInstalled.exchange(false):
+    return
+  discard setConsoleCtrlHandler(consoleCtrlHandler, FALSE)
+  gCtrlCallback = nil
+  if gSignalEvent != nil:
+    discard closeHandle(gSignalEvent)
+    gSignalEvent = nil
+  gCtrlEventReceived.store(false)
+
+proc signalEventHandle*(): HANDLE =
+  ## The manual-reset event the Ctrl-C handler signals. Pass this to
+  ## `WaitForMultipleObjects` alongside the console input handle so the
+  ## main loop wakes on either input or a control event.
+  ##
+  ## Returns nil if no handler has been installed.
+  gSignalEvent
+
+proc ctrlEventReceived*(): bool =
+  ## True if the Ctrl-C handler has fired since the last reset. Tests use
+  ## this to assert the handler ran without racing the OS scheduler.
+  gCtrlEventReceived.load()
+
+proc resetCtrlEventReceived*() =
+  ## Clear the `ctrlEventReceived` flag and ResetEvent the underlying
+  ## handle. Tests call this between cases.
+  gCtrlEventReceived.store(false)
+  if gSignalEvent != nil:
+    discard resetEvent(gSignalEvent)
+
+proc waitForCtrlEvent*(timeoutMs: int): bool =
+  ## Block up to `timeoutMs` waiting for a Ctrl event. Returns true if
+  ## the event fired within the window, false on timeout.
+  ##
+  ## Treated as a building block; the production `pollEvent` for Windows
+  ## will WaitForMultipleObjects on this + the input handle.
+  if gSignalEvent == nil: return false
+  let r = waitForSingleObject(gSignalEvent, DWORD(timeoutMs))
+  result = r == WAIT_OBJECT_0
 
 proc installWinchHandler*() =
-  ## Windows stub - real implementation will route
-  ## WINDOW_BUFFER_SIZE_EVENT records into the same self-pipe shape
-  ## POSIX uses. TODO: wire ReadConsoleInputW.
-  discard
+  ## Ensure ENABLE_WINDOW_INPUT is set on the console input handle so
+  ## resize events arrive as records. Also installs the Ctrl-C handler
+  ## with a nil callback so the same wakeup event signals on both
+  ## resize-via-input-record and Ctrl-C.
+  ##
+  ## Idempotent.
+  if gWinchHandlerInstalledWindows: return
+  let hin = getStdHandle(STD_INPUT_HANDLE)
+  if hin == INVALID_HANDLE_VALUE:
+    raise newException(TermctlError,
+      "GetStdHandle(STD_INPUT_HANDLE) failed")
+  var mode: DWORD
+  if getConsoleMode(hin, addr mode) == 0:
+    # Not a real console (e.g. piped input). The window-resize path is
+    # silently a no-op in that case - matches the POSIX behaviour where
+    # SIGWINCH simply doesn't fire for non-tty stdin.
+    gWinchHandlerInstalledWindows = true
+    return
+  gSavedInputModeForWinch = mode
+  let want = mode or ENABLE_WINDOW_INPUT
+  if want != mode:
+    discard setConsoleMode(hin, want)
+  if not gCtrlHandlerInstalled.load():
+    installCtrlCHandler(nil)
+  gWinchHandlerInstalledWindows = true
 
 proc uninstallWinchHandler*() =
-  discard
+  ## Restore the input mode and clear the resize wiring. Does NOT
+  ## uninstall the Ctrl-C handler - that has its own lifecycle.
+  if not gWinchHandlerInstalledWindows: return
+  gWinchHandlerInstalledWindows = false
+  let hin = getStdHandle(STD_INPUT_HANDLE)
+  if hin != INVALID_HANDLE_VALUE:
+    discard setConsoleMode(hin, gSavedInputModeForWinch)
 
+proc consoleInputHandle*(): HANDLE =
+  ## Convenience accessor for callers that want to WaitForMultipleObjects
+  ## on the input handle alongside `signalEventHandle`.
+  result = getStdHandle(STD_INPUT_HANDLE)
+
+proc pollWindowBufferSize*(): tuple[hadResize: bool; cols, rows: int] =
+  ## Drain pending console-input records, return the latest
+  ## WINDOW_BUFFER_SIZE_EVENT dimensions (if any). Non-blocking.
+  ##
+  ## Records that aren't WINDOW_BUFFER_SIZE_EVENT are *consumed* and
+  ## discarded - the production event loop will replace this with a
+  ## proper structured-record decoder once the L3 input-decoder
+  ## follow-up lands. Until then, calling this from the polling loop
+  ## means key/mouse events still need to be handled by the same
+  ## drain. For tests, only buffer-size records are written.
+  let hin = getStdHandle(STD_INPUT_HANDLE)
+  if hin == INVALID_HANDLE_VALUE: return
+  var pending: DWORD = 0
+  if getNumberOfConsoleInputEvents(hin, addr pending) == 0: return
+  if pending == 0: return
+  var records: array[64, InputRecordC]
+  while pending > 0:
+    var got: DWORD = 0
+    let want = if pending > DWORD(records.len): DWORD(records.len) else: pending
+    if readConsoleInputW(hin, addr records[0], want, addr got) == 0: break
+    if got == 0: break
+    for i in 0 ..< int(got):
+      if records[i].EventType == WINDOW_BUFFER_SIZE_EVENT:
+        # The dwSize is the first field of WINDOW_BUFFER_SIZE_RECORD;
+        # the union we declared as KeyEventRecordC happens to start
+        # with a BOOL (4 bytes) but the C union semantics ensure the
+        # underlying bytes are interpreted correctly when we cast.
+        let p = cast[ptr WindowBufferSizeRecordC](addr records[i].Event)
+        result.hadResize = true
+        result.cols = int(p.dwSize.x)
+        result.rows = int(p.dwSize.y)
+    if got < want: break
+    pending = pending - got
+
+proc injectWindowBufferSizeEvent*(cols, rows: int): bool =
+  ## Test hook: write a WINDOW_BUFFER_SIZE_EVENT record into the console
+  ## input buffer. Returns true on success. Used by
+  ## `tests/test_windows_window_resize.nim` to drive the resize path
+  ## without depending on the user actually resizing the console.
+  let hin = getStdHandle(STD_INPUT_HANDLE)
+  if hin == INVALID_HANDLE_VALUE: return false
+  var rec = InputRecordC(EventType: WINDOW_BUFFER_SIZE_EVENT)
+  let p = cast[ptr WindowBufferSizeRecordC](addr rec.Event)
+  p.dwSize = CoordC(x: SHORT(cols), y: SHORT(rows))
+  var written: DWORD = 0
+  result = writeConsoleInputW(hin, addr rec, DWORD(1), addr written) != 0 and
+           written == 1
+
+# Compatibility shims for cross-platform callers that grew up on the
+# POSIX self-pipe API. They return sentinel values on Windows; new code
+# should use `signalEventHandle` / `pollWindowBufferSize`.
 proc winchPipeReadFd*(): cint = -1
 proc drainWinchPipe*() = discard
 
