@@ -101,7 +101,7 @@ when not defined(windows):
       var tv: Timeval
       tv.tv_sec = posix.Time(remaining.inSeconds)
       let ms = remaining.inMilliseconds - remaining.inSeconds * 1000
-      tv.tv_usec = clong(ms * 1000)
+      tv.tv_usec = posix.Suseconds(ms * 1000)
       let n = select(cint(maxFd) + 1, addr rs, nil, nil, addr tv)
       if n == 0:
         # Tick the parser before giving up - a pending bare-Escape may
