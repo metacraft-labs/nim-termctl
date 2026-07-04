@@ -1,0 +1,9 @@
+schema = "reprobuild.solved-graph-lock.v2"
+
+[lock]
+platform = "amd64-linux"
+optimal = false
+inputs_digest = "fnv1a64:3d2f4857de769e01"
+variants = []
+packages = [{ name = "gcc", version = "12.0.0", source = "gcc" }, { name = "nim", version = "2.0.0", source = "nim" }, { name = "nim_termctl", version = "0.1.0", source = "nim_termctl" }]
+deps = [{ name = "nim-termctl", path = ".", coord_kind = "vcs", url = "", ref = "mcr-stege0-and-fixes", revision = "7f1abc5ce7483ddabb297930741a4ab4062c62ed", integrity = "git-sha1:7f1abc5ce7483ddabb297930741a4ab4062c62ed", version = "", visibility = "public", participation = "", depends = "", groups = "" }]
