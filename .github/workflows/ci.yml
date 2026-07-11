@@ -7,8 +7,12 @@ on:
 
 jobs:
   lint:
-    name: Lint
-    runs-on: ubuntu-latest
+    name: Lint (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [incus, tart-linux-arm, macos-tart]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -21,13 +25,17 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lint-logs
+          name: lint-logs-${{ matrix.runner }}
           path: test-logs/
           retention-days: 30
 
   test:
-    name: Test (orc/release/threads:on)
-    runs-on: ubuntu-latest
+    name: Test (orc/release/threads:on) (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [incus, tart-linux-arm, macos-tart]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -40,19 +48,20 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs
+          name: test-logs-${{ matrix.runner }}
           path: test-logs/
           retention-days: 30
 
   charter-matrix:
-    name: Charter (${{ matrix.mm }}/${{ matrix.mode }}/threads:${{ matrix.threads }})
-    runs-on: ubuntu-latest
+    name: Charter (${{ matrix.mm }}/${{ matrix.mode }}/threads:${{ matrix.threads }}) (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
+        runner: [incus, tart-linux-arm, macos-tart]
         mm: [arc, orc, refc]
         mode: [debug, release, danger]
         threads: [on, off]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -65,13 +74,14 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: charter-${{ matrix.mm }}-${{ matrix.mode }}-${{ matrix.threads }}-logs
+          name: charter-${{ matrix.mm }}-${{ matrix.mode }}-${{ matrix.threads }}-${{ matrix.runner }}-logs
           path: test-logs/
           retention-days: 30
 
   sanitizers:
     name: Sanitizer (${{ matrix.kind }})
-    runs-on: ubuntu-latest
+    # Linux-only (clang sanitizers); mapped to the Linux AMD64 Nix class.
+    runs-on: incus
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +104,8 @@ jobs:
 
   valgrind:
     name: Valgrind
-    runs-on: ubuntu-latest
+    # Linux-only (valgrind); mapped to the Linux AMD64 Nix class.
+    runs-on: incus
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -113,7 +124,7 @@ jobs:
 
   test-macos:
     name: Test (macOS)
-    runs-on: macos-latest
+    runs-on: macos-tart
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -134,8 +145,12 @@ jobs:
   # and type-checks the Windows code path. Catches Windows-side
   # regressions early without waiting on the (slower) Windows runner.
   check-windows-cross:
-    name: Check (Windows cross from Linux)
-    runs-on: ubuntu-latest
+    name: Check (Windows cross from Linux) (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [incus, tart-linux-arm, macos-tart]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -148,13 +163,17 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: check-windows-cross-logs
+          name: check-windows-cross-logs-${{ matrix.runner }}
           path: test-logs/
           retention-days: 30
 
   test-windows:
-    name: Test (Windows)
-    runs-on: windows-latest
+    name: Test (Windows) (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [win-ephemeral, win-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: jiro4989/setup-nim-action@v2
@@ -168,14 +187,15 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-test-logs
+          name: windows-test-logs-${{ matrix.runner }}
           path: test-logs/
           retention-days: 30
 
   test-leaks-heavy:
     name: Heavy leak budgets (100k cycles)
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # Linux-only leak-budget toolchain; mapped to the Linux AMD64 Nix class.
+    runs-on: incus
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -193,8 +213,12 @@ jobs:
           retention-days: 30
 
   nix-build:
-    name: nix build
-    runs-on: ubuntu-latest
+    name: nix build (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [incus, tart-linux-arm, macos-tart]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
