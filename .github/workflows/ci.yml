@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [incus, tart-linux-arm, macos-tart]
+        runner: [eph-linux-x64, eph-linux-arm64, eph-macos-arm64]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [incus, tart-linux-arm, macos-tart]
+        runner: [eph-linux-x64, eph-linux-arm64, eph-macos-arm64]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [incus, tart-linux-arm, macos-tart]
+        runner: [eph-linux-x64, eph-linux-arm64, eph-macos-arm64]
         mm: [arc, orc, refc]
         mode: [debug, release, danger]
         threads: [on, off]
@@ -81,7 +81,7 @@ jobs:
   sanitizers:
     name: Sanitizer (${{ matrix.kind }})
     # Linux-only (clang sanitizers); mapped to the Linux AMD64 Nix class.
-    runs-on: incus
+    runs-on: eph-linux-x64
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +105,7 @@ jobs:
   valgrind:
     name: Valgrind
     # Linux-only (valgrind); mapped to the Linux AMD64 Nix class.
-    runs-on: incus
+    runs-on: eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -124,7 +124,7 @@ jobs:
 
   test-macos:
     name: Test (macOS)
-    runs-on: macos-tart
+    runs-on: eph-macos-arm64
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -149,7 +149,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [incus, tart-linux-arm, macos-tart]
+        runner: [eph-linux-x64, eph-linux-arm64, eph-macos-arm64]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -172,7 +172,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [win-ephemeral, win-arm]
+        runner: [eph-win-x64, eph-win-arm64]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -195,7 +195,7 @@ jobs:
     name: Heavy leak budgets (100k cycles)
     if: github.ref == 'refs/heads/main'
     # Linux-only leak-budget toolchain; mapped to the Linux AMD64 Nix class.
-    runs-on: incus
+    runs-on: eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       - name: Setup Nix
@@ -217,7 +217,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [incus, tart-linux-arm, macos-tart]
+        runner: [eph-linux-x64, eph-linux-arm64, eph-macos-arm64]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
