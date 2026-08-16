@@ -9,6 +9,8 @@
 ##   * Hermetic flags (`--skipParentCfg --skipUserCfg`) are baked into
 ##     `nim-flags` so every invocation gets the same isolation.
 
+set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+
 alias t := test
 alias fmt := format
 
