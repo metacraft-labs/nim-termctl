@@ -15,3 +15,6 @@ tests/test_*
 *.dylib
 *.o
 *.obj
+
+# Repro development environment cache
+.repro/
