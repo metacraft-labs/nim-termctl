@@ -8,6 +8,10 @@
 ##     are what CI invokes per matrix cell.
 ##   * Hermetic flags (`--skipParentCfg --skipUserCfg`) are baked into
 ##     `nim-flags` so every invocation gets the same isolation.
+##   * `--skipParentCfg` also switches off the repo-root `config.nims`, which
+##     keeps every nimcache inside this checkout, so every `nim` invocation
+##     below names its own `--nimcache:` under `.nimcache/`, in the same
+##     layout the config uses: `.nimcache/<module dir>/<module>_<d|r|check>`.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
@@ -20,6 +24,13 @@ src-paths := "--path:src --path:tests"
 # Hermetic + style checks - applied to every nim invocation in this file.
 nim-flags := "--skipParentCfg --skipUserCfg --styleCheck:usages --styleCheck:error"
 
+# Per-checkout nimcache (see config.nims), relative to the recipe working
+# directory, which is this file's directory.  Nim's default,
+# `~/.cache/nim/<module>_<d|r>`, is shared by every checkout on the machine.
+# (Relative on purpose: an absolute Windows path would lose its backslashes
+# in the bash recipes.)
+nimcache := ".nimcache"
+
 # The ordered list of test files. Adding a new test_*.nim here gates it
 # on CI.
 #
@@ -28,7 +39,7 @@ nim-flags := "--skipParentCfg --skipUserCfg --styleCheck:usages --styleCheck:err
 # that the Linux matrix catches Windows-side regressions to test
 # scaffolding; on the `windows-latest` lane (=test-windows= recipe) the
 # guards drop and the real-stack assertions execute.
-tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim"
+tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim tests/test_nimcache_is_worktree_local.nim"
 
 # Windows-only tests are now part of the main `tests` list (guarded with
 # `when defined(windows)`). The `windows-tests` variable is kept for
@@ -44,6 +55,7 @@ build:
     @for t in {{tests}}; do \
       echo "Building $t"; \
       nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+          --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
           -o:test-logs/$(basename $t .nim) $t 2>&1 | tee -a test-logs/build.log; \
     done
 
@@ -55,10 +67,10 @@ lint: lint-nim lint-nix
 
 lint-nim:
     @mkdir -p test-logs
-    nim check {{nim-flags}} {{src-paths}} --mm:orc src/nim_termctl.nim 2>&1 | tee test-logs/lint-nim.log
+    nim check {{nim-flags}} {{src-paths}} --mm:orc --nimcache:{{nimcache}}/src/nim_termctl_check src/nim_termctl.nim 2>&1 | tee test-logs/lint-nim.log
     @for t in {{tests}}; do \
       echo "Checking $t"; \
-      nim check {{nim-flags}} {{src-paths}} --mm:orc $t 2>&1 | tee -a test-logs/lint-nim.log; \
+      nim check {{nim-flags}} {{src-paths}} --mm:orc --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_check $t 2>&1 | tee -a test-logs/lint-nim.log; \
     done
 
 lint-nix:
@@ -115,6 +127,7 @@ test-asan:
         echo "[asan/$mode] $t"; \
         CC=clang CXX=clang++ \
         nim c {{nim-flags}} {{src-paths}} \
+          --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
           --mm:orc -d:$mode -d:useMalloc \
           --cc:clang \
           --passC:-fsanitize=address --passL:-fsanitize=address \
@@ -129,6 +142,7 @@ test-ubsan:
       echo "[ubsan] $t"; \
       CC=clang CXX=clang++ \
       nim c {{nim-flags}} {{src-paths}} \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         --mm:orc -d:release -d:useMalloc \
         --cc:clang \
         --passC:-fsanitize=undefined --passL:-fsanitize=undefined \
@@ -141,6 +155,7 @@ test-tsan:
       echo "[tsan] $t"; \
       CC=clang CXX=clang++ \
       nim c {{nim-flags}} {{src-paths}} \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         --mm:orc -d:release -d:useMalloc --threads:on \
         --cc:clang \
         --passC:-fsanitize=thread --passL:-fsanitize=thread \
@@ -153,6 +168,7 @@ test-lsan:
       echo "[lsan] $t"; \
       CC=clang CXX=clang++ \
       nim c {{nim-flags}} {{src-paths}} \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         --mm:orc -d:release -d:useMalloc \
         --cc:clang \
         --passC:-fsanitize=leak --passL:-fsanitize=leak \
@@ -174,6 +190,7 @@ test-valgrind:
       out=test-logs/valgrind-$(basename $t .nim)
       echo "[valgrind] $t"
       nim c {{nim-flags}} {{src-paths}} \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         --mm:orc -d:release -d:useMalloc \
         --debugger:native \
         -o:$out $t 2>&1 | tee -a test-logs/valgrind.log
@@ -192,6 +209,7 @@ test-valgrind:
 test-leaks-heavy:
     @mkdir -p test-logs
     nim c {{nim-flags}} {{src-paths}} \
+      --nimcache:{{nimcache}}/tests/test_termctl_no_leaks_r \
       --mm:orc -d:release -d:nimTermctlHeavy \
       -r tests/test_termctl_no_leaks.nim 2>&1 | tee test-logs/leaks-heavy.log
 
@@ -202,16 +220,18 @@ test-all: test-arc test-orc test-refc test-threads-off
 # Internal: one matrix cell.  $1=mm, $2=mode, $3=threads
 _matrix mm mode threads:
     @mkdir -p test-logs
-    @for t in {{tests}}; do \
+    @case "{{mode}}" in debug) sfx=_d;; *) sfx=_r;; esac; \
+    for t in {{tests}}; do \
       echo "[{{mm}}/{{mode}}/threads:{{threads}}] $t"; \
       nim c {{nim-flags}} {{src-paths}} \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)$sfx \
         --mm:{{mm}} -d:{{mode}} --threads:{{threads}} \
         -r $t 2>&1 | tee -a test-logs/{{mm}}-{{mode}}-threads-{{threads}}.log; \
     done
 
 # Clean test-logs and nim caches - useful before a fresh CI-style run.
 clean:
-    rm -rf test-logs nim-cache
+    rm -rf test-logs nim-cache .nimcache
     find tests -maxdepth 1 -type f -executable -name "test_*" -not -name "*.nim" -delete
 
 # Benchmarks - placeholder; perf work lands with M9/M10 driver integrations.
@@ -222,6 +242,7 @@ bench:
 test-readme:
     @mkdir -p test-logs
     nim check {{nim-flags}} {{src-paths}} --mm:orc \
+      --nimcache:{{nimcache}}/tests/smoke_check \
       tests/smoke.nim 2>&1 | tee test-logs/readme.log
 
 # --- Windows lane ---
@@ -241,14 +262,17 @@ test-readme:
 check-windows-cross:
     @mkdir -p test-logs
     nim check {{nim-flags}} {{src-paths}} --os:windows --mm:orc \
+      --nimcache:{{nimcache}}/src/nim_termctl_check \
       src/nim_termctl.nim 2>&1 | tee test-logs/check-windows-cross.log
     @echo "[windows-cross-check] tests/test_windows_signals_compile.nim"
     nim check {{nim-flags}} {{src-paths}} --os:windows --mm:orc \
+      --nimcache:{{nimcache}}/tests/test_windows_signals_compile_check \
       tests/test_windows_signals_compile.nim 2>&1 | \
       tee -a test-logs/check-windows-cross.log
     @for t in {{windows-tests}}; do \
       echo "[windows-cross-check] $t"; \
       nim check {{nim-flags}} {{src-paths}} --os:windows --mm:orc \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_check \
         $t 2>&1 | tee -a test-logs/check-windows-cross.log; \
     done
 
@@ -259,10 +283,12 @@ test-windows:
     @for t in {{tests}}; do \
       echo "[windows] $t"; \
       nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         -r $t 2>&1 | tee -a test-logs/windows.log; \
     done
     @for t in {{windows-tests}}; do \
       echo "[windows-only] $t"; \
       nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         -r $t 2>&1 | tee -a test-logs/windows.log; \
     done
