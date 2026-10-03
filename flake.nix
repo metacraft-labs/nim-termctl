@@ -75,6 +75,7 @@
                 nim
                 nimble
                 just
+                bash
                 nixfmt-rfc-style
                 # Sanitizer-augmented Nim builds need clang on Linux. The
                 # Justfile's `test-asan` recipe expects clang in $PATH.
