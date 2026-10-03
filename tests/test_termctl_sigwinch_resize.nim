@@ -41,7 +41,7 @@ suite "L3: SIGWINCH self-pipe":
       FD_SET(fd, rs)
       var tv: Timeval
       tv.tv_sec = posix.Time(1)
-      tv.tv_usec = clong(0)
+      tv.tv_usec = typeof(tv.tv_usec)(0)
       let n = select(fd + 1, addr rs, nil, nil, addr tv)
       check n == 1
 
@@ -53,7 +53,7 @@ suite "L3: SIGWINCH self-pipe":
       FD_SET(fd, rs)
       var tv0: Timeval
       tv0.tv_sec = posix.Time(0)
-      tv0.tv_usec = clong(0)
+      tv0.tv_usec = typeof(tv0.tv_usec)(0)
       let n2 = select(fd + 1, addr rs, nil, nil, addr tv0)
       check n2 == 0
     else:

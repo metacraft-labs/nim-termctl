@@ -187,8 +187,23 @@ jobs:
       - uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: '2.2.4'
-      - name: Install just
-        run: choco install just -y
+      - name: Install native just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: 1.50.0
+      - name: Verify native just identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $just = (Get-Command just -CommandType Application).Source
+          if ((& $just --version) -ne 'just 1.50.0') { throw 'Unexpected just version' }
+          $bytes = [IO.File]::ReadAllBytes($just)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x00004550) { throw 'Invalid PE signature' }
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          $expected = if ('${{ matrix.runner[2] }}' -eq 'arm64') { 0xAA64 } else { 0x8664 }
+          Write-Host ('just={0}; version=1.50.0; PE-machine=0x{1:X4}' -f $just, $machine)
+          if ($machine -ne $expected) { throw 'just is not native to the runner architecture' }
       - name: Run Windows test lane
         run: just test-windows
         shell: cmd

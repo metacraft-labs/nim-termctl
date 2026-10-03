@@ -109,7 +109,7 @@ suite "L3 charter: leak-budget tests":
         FD_SET(m, rs)
         var tv: Timeval
         tv.tv_sec = posix.Time(0)
-        tv.tv_usec = clong(0)
+        tv.tv_usec = typeof(tv.tv_usec)(0)
         if select(m + 1, addr rs, nil, nil, addr tv) > 0:
           discard read(m, addr dummy[0], dummy.len)
         discard close(m)

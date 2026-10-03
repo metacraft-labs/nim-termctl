@@ -12,6 +12,7 @@ tests/test_*
 !tests/*.nim
 !tests/*.nims
 !tests/test_helpers
+!tests/*.sh
 *.exe
 *.dll
 *.so

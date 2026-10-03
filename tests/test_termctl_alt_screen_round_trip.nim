@@ -19,7 +19,7 @@ proc readAvailable(fd: cint; timeoutMs: int): string =
     FD_SET(fd, rs)
     var tv: Timeval
     tv.tv_sec = posix.Time(0)
-    tv.tv_usec = clong(timeoutMs * 1000 div 50)
+    tv.tv_usec = typeof(tv.tv_usec)(timeoutMs * 1000 div 50)
     let n = select(fd + 1, addr rs, nil, nil, addr tv)
     if n <= 0: break
     var buf: array[4096, byte]
