@@ -69,17 +69,19 @@
         {
           checks.pre-commit = preCommit;
           devShells.default = pkgs.mkShell {
-            packages = with pkgs; [
-              nim
-              nimble
-              just
-              nixfmt-rfc-style
-              # Sanitizer-augmented Nim builds need clang on Linux. The
-              # Justfile's `test-asan` recipe expects clang in $PATH.
-              clang
-              # Valgrind for the secondary leak-budget check.
-              valgrind
-            ];
+            packages =
+              with pkgs;
+              [
+                nim
+                nimble
+                just
+                nixfmt-rfc-style
+                # Sanitizer-augmented Nim builds need clang on Linux. The
+                # Justfile's `test-asan` recipe expects clang in $PATH.
+                clang
+              ]
+              # Valgrind is the Linux-only secondary leak-budget instrument.
+              ++ lib.optionals stdenv.isLinux [ valgrind ];
             shellHook = ''
               ${ownRepoOnly preCommit.shellHook}
               echo "nim-termctl dev shell - nim $(nim --version 2>&1 | head -1)"
