@@ -105,6 +105,11 @@ var
   gMouseActive {.threadvar.}: bool
   gPasteActive {.threadvar.}: bool
   gFocusActive {.threadvar.}: bool
+  gKeyReportingActive {.threadvar.}: int
+    ## Which extended key reporting `enableKeyReporting` turned on: 0 none,
+    ## 1 Kitty, 2 `modifyOtherKeys`. An int and not a string so the signal
+    ## handler reads a word and writes a constant, allocating and freeing
+    ## nothing.
   gAtexitInstalled {.threadvar.}: bool
   gSigHandlersInstalled {.threadvar.}: bool
 
@@ -114,6 +119,8 @@ const
   pasteLeaveSeq = "\x1b[?2004l"
   focusLeaveSeq = "\x1b[?1004l"
   showCursorSeqLocal = "\x1b[?25h"
+  kittyPopSeqLocal = "\x1b[<u"
+  modifyOtherKeysOffSeqLocal = "\x1b[>4;0m"
 
 proc writeAllSafe(fd: cint; s: string) =
   ## Async-signal-safe `write(2)` - no Nim allocation. Used by the signal
@@ -133,9 +140,18 @@ proc restoreTerminalSafe() {.cdecl.} =
   if not gNeedsRestore:
     return
   gNeedsRestore = false
-  # Order matters: leave alt-screen and mouse mode FIRST so the visible
-  # output (cursor visibility, normal scroll buffer) is what users see
-  # post-restore. Then drop termios back to cooked.
+  # Order matters: undo extended key reporting FIRST — the Kitty protocol
+  # keeps one flag stack per screen, so its pop must reach the alternate
+  # screen it was pushed on, before that screen is left. A terminal left in
+  # disambiguate mode sends `CSI 99 ; 5 u` for Ctrl+c to the user's shell.
+  # Then leave alt-screen and mouse mode so the visible output (cursor
+  # visibility, normal scroll buffer) is what users see post-restore. Then
+  # drop termios back to cooked.
+  if gKeyReportingActive == 1:
+    writeAllSafe(STDOUT_FILENO, kittyPopSeqLocal)
+  elif gKeyReportingActive == 2:
+    writeAllSafe(STDOUT_FILENO, modifyOtherKeysOffSeqLocal)
+  gKeyReportingActive = 0
   if gAltScreenActive:
     writeAllSafe(STDOUT_FILENO, altScreenLeaveSeq)
     gAltScreenActive = false
@@ -186,6 +202,29 @@ proc onSignal(sig: cint) {.noconv.} =
   discard sigaction(sig, sa, nil)
   discard kill(getpid(), sig)
 
+const FatalSignals = [SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT]
+  ## A CRASH. The process is dying either way; what is ours to do is give the
+  ## terminal back first — a terminal left in the alternate screen, in raw
+  ## mode, or with the Kitty keyboard protocol on (`Ctrl+c` arriving at the
+  ## user's shell as `CSI 99 ; 5 u`) is the crash's damage outliving it.
+
+var gPreviousFatal: array[5, Sigaction]
+  ## Whatever handled each fatal signal before us (the language runtime's
+  ## stack-trace printer, or the default). Not thread-local: a crash is
+  ## delivered to whichever thread faulted.
+
+proc onFatalSignal(sig: cint) {.noconv.} =
+  ## Restore the terminal, then hand the signal back to the handler that was
+  ## there before: reinstate it and raise the signal again. The signal is
+  ## blocked while this handler runs, so the re-raise is delivered — to the
+  ## previous action — the moment this returns, whether the crash was a real
+  ## fault or a `kill`.
+  restoreTerminalSafe()
+  for i, fatal in FatalSignals:
+    if fatal == sig:
+      discard sigaction(sig, gPreviousFatal[i], nil)
+  discard kill(getpid(), sig)
+
 proc installSignalHandlers() =
   if gSigHandlersInstalled: return
   gSigHandlersInstalled = true
@@ -197,6 +236,12 @@ proc installSignalHandlers() =
   discard sigaction(SIGTERM, sa, nil)
   discard sigaction(SIGHUP, sa, nil)
   discard sigaction(SIGQUIT, sa, nil)
+  var fatal = Sigaction()
+  fatal.sa_handler = onFatalSignal
+  discard sigemptyset(fatal.sa_mask)
+  fatal.sa_flags = 0
+  for i, sig in FatalSignals:
+    discard sigaction(sig, fatal, addr gPreviousFatal[i])
 
 proc installCtrlCHandler*(callback: CtrlCallback) =
   ## POSIX-side parity surface for the Windows =installCtrlCHandler=. On
@@ -376,6 +421,68 @@ proc leaveAltScreen*(a: var AltScreen) =
   writeStringRaw(a.fd, "\x1b[?1049l")
   a.active = false
   gAltScreenActive = false
+
+# ---------------------------------------------------------------------------
+# Extended key reporting (the Kitty keyboard protocol, xterm modifyOtherKeys)
+# ---------------------------------------------------------------------------
+
+type
+  KeyReportingMode* = enum
+    ## How the terminal is asked to report keys.
+    krmKitty        ## Kitty progressive enhancement, flag 1 (disambiguate)
+    krmModifyOtherKeys ## xterm `modifyOtherKeys` level 2
+
+  KeyReporting* = object
+    ## RAII handle for extended key reporting. While alive the terminal
+    ## reports modified keys unambiguously; on destruction, on
+    ## `disableKeyReporting`, and from the signal / atexit restore, the mode is
+    ## undone — the Kitty flags popped, `modifyOtherKeys` reset.
+    fd*: cint
+    mode*: KeyReportingMode
+    active*: bool
+
+const
+  KittyPushDisambiguateSeq* = "\x1b[>1u"
+  KittyPopSeq* = "\x1b[<u"
+  ModifyOtherKeysOnSeq* = "\x1b[>4;2m"
+  ModifyOtherKeysOffSeq* = "\x1b[>4;0m"
+
+func keyReportingLeaveSeq*(mode: KeyReportingMode): string =
+  ## The bytes that undo `mode`.
+  case mode
+  of krmKitty: KittyPopSeq
+  of krmModifyOtherKeys: ModifyOtherKeysOffSeq
+
+proc `=copy`*(dest: var KeyReporting; src: KeyReporting) {.error.}
+
+template keyReportingDestroyBody(k: untyped) =
+  if k.active:
+    let leave = keyReportingLeaveSeq(k.mode)
+    discard cWrite(k.fd, cast[pointer](cstring(leave)), csize_t(leave.len))
+    gKeyReportingActive = 0
+
+when defined(gcDestructors):
+  proc `=destroy`*(k: KeyReporting) = keyReportingDestroyBody(k)
+else:
+  proc `=destroy`*(k: var KeyReporting) = keyReportingDestroyBody(k)
+
+proc enableKeyReporting*(mode: KeyReportingMode;
+                        fd: cint = STDOUT_FILENO): KeyReporting =
+  ## Ask the terminal for extended key reporting. Call AFTER `enterAltScreen`:
+  ## the Kitty flag stack is per screen. The undo sequence is registered with
+  ## the async-signal-safe restore before this returns, so a SIGTERM, a SIGHUP
+  ## or a crash from here on leaves the terminal in its legacy encoding.
+  gKeyReportingActive = (if mode == krmKitty: 1 else: 2)
+  case mode
+  of krmKitty: writeStringRaw(fd, KittyPushDisambiguateSeq)
+  of krmModifyOtherKeys: writeStringRaw(fd, ModifyOtherKeysOnSeq)
+  result = KeyReporting(fd: fd, mode: mode, active: true)
+
+proc disableKeyReporting*(k: var KeyReporting) =
+  if not k.active: return
+  writeStringRaw(k.fd, keyReportingLeaveSeq(k.mode))
+  k.active = false
+  gKeyReportingActive = 0
 
 # ---------------------------------------------------------------------------
 # Mouse capture / bracketed paste / focus reporting

@@ -39,7 +39,7 @@ nimcache := ".nimcache"
 # that the Linux matrix catches Windows-side regressions to test
 # scaffolding; on the `windows-latest` lane (=test-windows= recipe) the
 # guards drop and the real-stack assertions execute.
-tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim tests/test_nimcache_is_worktree_local.nim"
+tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_key_reporting_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim tests/test_nimcache_is_worktree_local.nim"
 
 # Windows-only tests are now part of the main `tests` list (guarded with
 # `when defined(windows)`). The `windows-tests` variable is kept for
