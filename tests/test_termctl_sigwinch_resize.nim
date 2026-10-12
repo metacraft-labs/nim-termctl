@@ -19,6 +19,9 @@ import test_helpers
 var
   TestSIGWINCH {.importc: "SIGWINCH", header: "<signal.h>".}: cint
 
+# TIOCSWINSZ is a C macro, so use it without emitting a variable declaration.
+let TIOCSWINSZ {.importc, header: "<sys/ioctl.h>", nodecl.}: culong
+
 suite "L3: SIGWINCH self-pipe":
 
   test "SIGWINCH writes a byte to the pipe":
@@ -84,7 +87,6 @@ suite "L3: SIGWINCH self-pipe":
         ws_xpixel: cushort
         ws_ypixel: cushort
     var ws = WinsizeC(ws_row: 30, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0)
-    var TIOCSWINSZ {.importc, header: "<sys/ioctl.h>".}: culong
     proc cIoctl(fd: cint; request: culong): cint
       {.importc: "ioctl", header: "<sys/ioctl.h>", varargs.}
     check cIoctl(slave, TIOCSWINSZ, addr ws) == 0
