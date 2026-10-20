@@ -38,9 +38,16 @@ try {
         $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
         if ($digest -cne $hashes[$name]) { throw "Selected source hash mismatch: $name" }
         $path = Join-Path $source $name
-        $stream = [IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)
-        $stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)
+        $writer = [IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try { $writer.Write($bytes,0,$bytes.Length);$writer.Flush($true) } finally { $writer.Dispose() }
+        # Readers must share every existing access on Windows. Retain a
+        # read-only, no-write/no-delete-sharing handle and authenticate THAT
+        # handle after reopening, before any path-based source consumer runs.
+        $stream = [IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
         $held[$name] = $stream
+        $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant()
+        $stream.Position = 0
+        if ($actual -cne $hashes[$name]) { throw "Reopened source hash mismatch: $name" }
     }
     # Execute only the already authenticated bytes, not another path lookup.
     . ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path $source 'toolchain-utils.ps1'))))
