@@ -6,4 +6,4 @@ optimal = false
 inputs_digest = "fnv1a64:1f7ef8af8ff229b9"
 variants = []
 packages = [{ name = "gcc", version = "12.0.0", source = "gcc", selection = "selected" }, { name = "nim", version = "2.0.0", source = "nim", selection = "selected" }, { name = "nim_termctl", version = "0.1.0", source = "nim_termctl", selection = "selected" }]
-deps = [{ name = "nim-termctl", path = ".", coord_kind = "vcs", url = "https://github.com/metacraft-labs/nim-termctl", ref = "agents-to-dev-2026-10-03", revision = "4a151df20242fe6b00362f382f0674b5345853e0", integrity = "git-sha1:4a151df20242fe6b00362f382f0674b5345853e0", version = "", visibility = "public", participation = "", depends = "", tags = "" }]
+deps = [{ name = "nim-termctl", path = ".", coord_kind = "vcs", url = "https://github.com/metacraft-labs/nim-termctl", ref = "agents-to-dev-2026-10-03", revision = "42fad297ac9d4b1fa9c7d3aeee46ececf590d29d", integrity = "git-sha1:42fad297ac9d4b1fa9c7d3aeee46ececf590d29d", version = "", visibility = "public", participation = "", depends = "", tags = "" }]
