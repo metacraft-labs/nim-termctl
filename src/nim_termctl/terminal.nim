@@ -8,6 +8,7 @@
 
 import std/strutils
 import ./cursor
+export cursor
 
 when defined(windows):
   import ./windows_backend
