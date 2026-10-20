@@ -116,6 +116,11 @@ jobs:
           command -v repro
           repro --version
 
+      - name: Provision declared native Windows x64 C compiler
+        if: runner.os == 'Windows' && runner.arch == 'X64'
+        shell: pwsh
+        run: ./ci/ensure-windows-gcc.ps1
+
       - name: repro build
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the terminal-control library graph
