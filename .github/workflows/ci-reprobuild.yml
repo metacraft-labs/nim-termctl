@@ -121,6 +121,25 @@ jobs:
         shell: pwsh
         run: ./ci/ensure-windows-gcc.ps1
 
+      - name: Isolate Linux interface diagnostics in an owned work root
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 - <<'PYDIAG'
+          import json, os, pathlib, tempfile
+          parent = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          work = pathlib.Path(tempfile.mkdtemp(prefix='termctl-repro-work-', dir=parent))
+          assert work.resolve(strict=True).parent == parent and not work.is_symlink()
+          assert not any(work.iterdir())
+          value = str(work)
+          assert '\n' not in value and '\r' not in value
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('REPROBUILD_WORK_ROOT=' + value + '\n')
+          evidence = pathlib.Path('.repro/interface-diagnostics-root.json')
+          evidence.parent.mkdir(exist_ok=True)
+          evidence.write_text(json.dumps({'configuredWorkRoot': value, 'resolvedWorkRoot': str(work.resolve(strict=True)), 'candidate': os.environ['GITHUB_SHA'], 'selectedReproSource': '76659f5730ecf698b1963c656494d2cb66eb256d'}, indent=2) + '\n')
+          PYDIAG
+
       - name: repro build
         # Builds the conventional `build` collection declared in
         # `repro.nim`. Verifies the terminal-control library graph
@@ -177,6 +196,22 @@ jobs:
           path: |
             .repro/build/*/build-failure-report.json
             .repro/build/*/build-engine-cache/actions/
+            .repro/build/*/build-engine-cache/runquota-results/*.json
+            .repro/interface-diagnostics-root.json
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload isolated Linux interface failure diagnostics
+        if: failure() && runner.os == 'Linux' && env.REPROBUILD_WORK_ROOT != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: reprobuild-interface-logs-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-failure-report.json
+            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-engine-cache/actions/*.stdout.log
+            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-engine-cache/actions/*.stderr.log
+            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-engine-cache/runquota-results/*.json
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
