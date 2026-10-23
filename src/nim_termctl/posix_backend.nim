@@ -202,13 +202,23 @@ proc onSignal(sig: cint) {.noconv.} =
   discard sigaction(sig, sa, nil)
   discard kill(getpid(), sig)
 
-const FatalSignals = [SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT]
+let FatalSignals = [SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT]
   ## A CRASH. The process is dying either way; what is ours to do is give the
   ## terminal back first — a terminal left in the alternate screen, in raw
   ## mode, or with the Kitty keyboard protocol on (`Ctrl+c` arriving at the
   ## user's shell as `CSI 99 ; 5 u`) is the crash's damage outliving it.
+  ##
+  ## `let`, NOT `const`, and that is forced by the platform rather than a
+  ## preference. Nim's `posix` module defines these as compile-time values on
+  ## Linux (`posix_linux_amd64_consts.nim`: `const SIGSEGV* = cint(11)`) but
+  ## as C globals read from the header everywhere else
+  ## (`posix_other_consts.nim`: `var SIGSEGV* {.importc: "SIGSEGV",
+  ## header: "<signal.h>".}: cint`), which is what macOS uses. A `const`
+  ## array of them therefore compiles on Linux and CANNOT compile on macOS:
+  ## `Error: cannot evaluate at compile time: SIGSEGV`. Nothing here needs
+  ## them at compile time — both uses below are ordinary runtime loops.
 
-var gPreviousFatal: array[5, Sigaction]
+var gPreviousFatal: array[FatalSignals.len, Sigaction]
   ## Whatever handled each fatal signal before us (the language runtime's
   ## stack-trace printer, or the default). Not thread-local: a crash is
   ## delivered to whichever thread faulted.
