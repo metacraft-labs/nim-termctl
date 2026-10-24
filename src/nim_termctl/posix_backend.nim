@@ -114,6 +114,21 @@ var
   gSigHandlersInstalled {.threadvar.}: bool
 
 const
+  ExtraRestoreCapacity* = 512
+    ## Bytes an application may add to the restore (`setExtraRestore`).
+
+var
+  gExtraRestore: array[ExtraRestoreCapacity, char]
+  gExtraRestoreLen: int
+    ## The APPLICATION'S modes, reset by the same async-signal-safe restore
+    ## as the ones this library sets: synchronized output (2026), grapheme
+    ## clustering (2027), pixel and any-motion mouse (1016, 1003), a pointer
+    ## shape pushed with OSC 22 — whatever the application turned on that is
+    ## not raw mode, the alternate screen, mouse capture, paste, focus or
+    ## extended keys. A FIXED array, written by `write(2)` from the signal
+    ## handler: nothing is allocated on the restore path.
+
+const
   altScreenLeaveSeq = "\x1b[?1049l"
   mouseLeaveSeq = "\x1b[?1006l\x1b[?1000l"
   pasteLeaveSeq = "\x1b[?2004l"
@@ -152,6 +167,10 @@ proc restoreTerminalSafe() {.cdecl.} =
   elif gKeyReportingActive == 2:
     writeAllSafe(STDOUT_FILENO, modifyOtherKeysOffSeqLocal)
   gKeyReportingActive = 0
+  # The application's own modes, on the screen they were set on.
+  if gExtraRestoreLen > 0:
+    discard cWrite(STDOUT_FILENO, cast[pointer](addr gExtraRestore[0]),
+                   csize_t(gExtraRestoreLen))
   if gAltScreenActive:
     writeAllSafe(STDOUT_FILENO, altScreenLeaveSeq)
     gAltScreenActive = false
@@ -167,6 +186,37 @@ proc restoreTerminalSafe() {.cdecl.} =
   writeAllSafe(STDOUT_FILENO, showCursorSeqLocal)
   if gActiveTty >= 0:
     discard tcSetAttr(gActiveTty, TCSAFLUSH, addr gSavedTermios)
+
+proc setExtraRestore*(sequence: string): bool =
+  ## Register the bytes that undo the application's own terminal modes (see
+  ## `gExtraRestore`), REPLACING any earlier registration. They are written by
+  ## the restore on EVERY exit path — `atexit`, SIGINT / SIGTERM / SIGHUP /
+  ## SIGQUIT, a crash — after extended keys are undone and before the
+  ## alternate screen is left; `writeExtraRestore` writes the same bytes on
+  ## a normal exit, so one buffer serves every path. False (and nothing
+  ## changed) when `sequence` is longer than `ExtraRestoreCapacity`.
+  if sequence.len > ExtraRestoreCapacity:
+    return false
+  # The length is cleared first and set last, so a signal arriving while the
+  # bytes are copied writes either nothing or the whole new sequence.
+  gExtraRestoreLen = 0
+  for i, c in sequence:
+    gExtraRestore[i] = c
+  gExtraRestoreLen = sequence.len
+  true
+
+proc extraRestore*(): string =
+  ## The registered bytes (for a test, and for the report).
+  result = newString(gExtraRestoreLen)
+  for i in 0 ..< gExtraRestoreLen:
+    result[i] = gExtraRestore[i]
+
+proc writeExtraRestore*(fd: cint = STDOUT_FILENO) =
+  ## The registered bytes, written now — the normal exit's half of the one
+  ## buffer. Leaves the registration in place.
+  if gExtraRestoreLen > 0:
+    discard cWrite(fd, cast[pointer](addr gExtraRestore[0]),
+                   csize_t(gExtraRestoreLen))
 
 type
   CtrlCallback* = proc () {.gcsafe.}

@@ -660,3 +660,24 @@ proc writeStringRaw*(fd: cint; s: string) =
 const
   STDIN_FILENO* = cint(0)
   STDOUT_FILENO* = cint(1)
+
+# ---------------------------------------------------------------------------
+# The application's own modes, reset on exit (parity with the POSIX backend's
+# `setExtraRestore`). Windows has no async-signal context to be careful of;
+# the bytes are written by `writeExtraRestore` on the normal exit path.
+# ---------------------------------------------------------------------------
+
+const ExtraRestoreCapacity* = 512
+
+var gExtraRestore {.threadvar.}: string
+
+proc setExtraRestore*(sequence: string): bool =
+  if sequence.len > ExtraRestoreCapacity:
+    return false
+  gExtraRestore = sequence
+  true
+
+proc extraRestore*(): string = gExtraRestore
+
+proc writeExtraRestore*(fd: cint = STDOUT_FILENO) =
+  writeStringRaw(fd, gExtraRestore)
