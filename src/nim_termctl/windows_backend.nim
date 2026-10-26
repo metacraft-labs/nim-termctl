@@ -22,7 +22,6 @@
 when not defined(windows):
   {.error: "windows_backend.nim is for Windows only - use posix_backend.nim".}
 
-import std/[atomics]
 
 # ---------------------------------------------------------------------------
 # Win32 FFI - minimal subset.
@@ -30,7 +29,12 @@ import std/[atomics]
 
 type
   HANDLE* = pointer
-  DWORD = uint32
+  DWORD = culong
+    ## Win32 `DWORD` is `unsigned long`, a C type distinct from
+    ## `unsigned int` under LLP64 even though both are 32 bits. GCC
+    ## (>=14, e.g. the WinLibs 16.1.0 toolchain CI provisions) treats
+    ## `uint32*` passed where `LPDWORD` (`unsigned long*`) is expected
+    ## as an incompatible-pointer-type error, not a warning.
   BOOL = int32
   WORD = uint16
   SHORT = int16
@@ -74,14 +78,14 @@ const
 
 type
   CoordC {.importc: "COORD", header: "<windows.h>", pure, final.} = object
-    x: SHORT
-    y: SHORT
+    x {.importc: "X".}: SHORT
+    y {.importc: "Y".}: SHORT
 
   SmallRectC {.importc: "SMALL_RECT", header: "<windows.h>", pure, final.} = object
-    left: SHORT
-    top: SHORT
-    right: SHORT
-    bottom: SHORT
+    left {.importc: "Left".}: SHORT
+    top {.importc: "Top".}: SHORT
+    right {.importc: "Right".}: SHORT
+    bottom {.importc: "Bottom".}: SHORT
 
   ConsoleScreenBufferInfoC {.importc: "CONSOLE_SCREEN_BUFFER_INFO",
                              header: "<windows.h>", pure, final.} = object
@@ -412,6 +416,9 @@ proc cursorPositionFromBuffer*(): tuple[col, row: int] =
 #     same manual-reset event so the main wait wakes up.
 #
 # Public surface (mirrors the POSIX side):
+#   * `acquireCtrlCHandler(callback)` returns a noncopyable value owner.
+#     Its destructor retires and drains the handler before releasing its
+#     captured environment on the installing Nim thread.
 #   * `installCtrlCHandler(callback)` -> POSIX equivalent of
 #     installSignalHandlers (which catches SIGINT/SIGTERM/SIGHUP/SIGQUIT
 #     internally; on Windows the comparable surface is
@@ -434,96 +441,14 @@ type
     ## no I/O beyond the bare minimum). Most callers should just push a
     ## token into a thread-safe queue.
 
+# Resize state remains on its original calling thread. Control registration
+# and its manual-reset event are process-global native state, with explicit
+# installer-thread value ownership for the captured Nim environment.
 var
-  gSignalEvent {.threadvar.}: HANDLE
-  gCtrlHandlerInstalled: Atomic[bool]
-  gCtrlCallback: CtrlCallback
-  gCtrlEventReceived: Atomic[bool]
-    ## Set to true when the handler fires. Tests poll this to verify the
-    ## handler ran without racing the wait.
   gWinchHandlerInstalledWindows {.threadvar.}: bool
   gSavedInputModeForWinch {.threadvar.}: DWORD
 
-proc consoleCtrlHandler(eventType: DWORD): BOOL {.stdcall.} =
-  ## Win32 control handler. Runs on a dedicated thread spawned by the
-  ## OS; we keep work to a minimum: signal the wakeup event, then call
-  ## the user's typed callback if one is registered.
-  ##
-  ## Return TRUE so Windows treats the event as consumed (otherwise the
-  ## default action - process termination on CTRL_C_EVENT - runs).
-  case eventType
-  of CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT,
-     CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT:
-    gCtrlEventReceived.store(true)
-    if gSignalEvent != nil and gSignalEvent != INVALID_HANDLE_VALUE:
-      discard setEvent(gSignalEvent)
-    let cb = gCtrlCallback
-    if cb != nil:
-      try:
-        cb()
-      except CatchableError:
-        discard
-    result = TRUE
-  else:
-    result = FALSE
-
-proc installCtrlCHandler*(callback: CtrlCallback) =
-  ## Register a Ctrl-C / Ctrl-Break / console-close handler. Idempotent
-  ## w.r.t. the underlying SetConsoleCtrlHandler registration: a second
-  ## call replaces the callback in place.
-  ##
-  ## The callback fires on a thread Windows spawns; do not block in it.
-  gCtrlCallback = callback
-  if not gCtrlHandlerInstalled.exchange(true):
-    if gSignalEvent == nil:
-      gSignalEvent = createEventW(nil, TRUE, FALSE, nil)
-    if setConsoleCtrlHandler(consoleCtrlHandler, TRUE) == FALSE:
-      # Roll back the flag so a retry has a chance.
-      gCtrlHandlerInstalled.store(false)
-      raise newException(TermctlError,
-        "SetConsoleCtrlHandler(install) failed")
-
-proc uninstallCtrlCHandler*() =
-  ## Unregister the previously-installed Ctrl-C handler. Closes the
-  ## signal event and clears the saved callback. Idempotent.
-  if not gCtrlHandlerInstalled.exchange(false):
-    return
-  discard setConsoleCtrlHandler(consoleCtrlHandler, FALSE)
-  gCtrlCallback = nil
-  if gSignalEvent != nil:
-    discard closeHandle(gSignalEvent)
-    gSignalEvent = nil
-  gCtrlEventReceived.store(false)
-
-proc signalEventHandle*(): HANDLE =
-  ## The manual-reset event the Ctrl-C handler signals. Pass this to
-  ## `WaitForMultipleObjects` alongside the console input handle so the
-  ## main loop wakes on either input or a control event.
-  ##
-  ## Returns nil if no handler has been installed.
-  gSignalEvent
-
-proc ctrlEventReceived*(): bool =
-  ## True if the Ctrl-C handler has fired since the last reset. Tests use
-  ## this to assert the handler ran without racing the OS scheduler.
-  gCtrlEventReceived.load()
-
-proc resetCtrlEventReceived*() =
-  ## Clear the `ctrlEventReceived` flag and ResetEvent the underlying
-  ## handle. Tests call this between cases.
-  gCtrlEventReceived.store(false)
-  if gSignalEvent != nil:
-    discard resetEvent(gSignalEvent)
-
-proc waitForCtrlEvent*(timeoutMs: int): bool =
-  ## Block up to `timeoutMs` waiting for a Ctrl event. Returns true if
-  ## the event fired within the window, false on timeout.
-  ##
-  ## Treated as a building block; the production `pollEvent` for Windows
-  ## will WaitForMultipleObjects on this + the input handle.
-  if gSignalEvent == nil: return false
-  let r = waitForSingleObject(gSignalEvent, DWORD(timeoutMs))
-  result = r == WAIT_OBJECT_0
+include ./ctrl_owner_adapter
 
 proc installWinchHandler*() =
   ## Ensure ENABLE_WINDOW_INPUT is set on the console input handle so
@@ -548,7 +473,7 @@ proc installWinchHandler*() =
   let want = mode or ENABLE_WINDOW_INPUT
   if want != mode:
     discard setConsoleMode(hin, want)
-  if not gCtrlHandlerInstalled.load():
+  if signalEventHandle() == nil:
     installCtrlCHandler(nil)
   gWinchHandlerInstalledWindows = true
 
