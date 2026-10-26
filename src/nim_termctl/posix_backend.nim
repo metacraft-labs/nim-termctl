@@ -118,6 +118,15 @@ const
     ## Bytes an application may add to the restore (`setExtraRestore`).
 
 var
+  gRawTermios {.threadvar.}: Termios
+    ## The raw attributes `enableRawMode` set — put back after a stop
+    ## (SIGTSTP) is continued.
+  gResumed {.threadvar.}: bool
+    ## A stop was continued since `takeResumed` last answered.
+  gExtraResume: array[ExtraRestoreCapacity, char]
+  gExtraResumeLen: int
+    ## The bytes that put the APPLICATION'S modes back after a stop is
+    ## continued (`setExtraResume`) — the counterpart of `gExtraRestore`.
   gExtraRestore: array[ExtraRestoreCapacity, char]
   gExtraRestoreLen: int
     ## The APPLICATION'S modes, reset by the same async-signal-safe restore
@@ -211,6 +220,35 @@ proc extraRestore*(): string =
   for i in 0 ..< gExtraRestoreLen:
     result[i] = gExtraRestore[i]
 
+proc setExtraResume*(sequence: string): bool =
+  ## Register the bytes that put the application's own terminal modes back
+  ## when the process continues after a stop (SIGTSTP, then SIGCONT): the
+  ## stop wrote the restore (`setExtraRestore`) and gave the terminal back;
+  ## the continue takes it again — raw mode, the alternate screen, mouse,
+  ## paste, focus and extended keys as they were — and then writes these.
+  ## REPLACES any earlier registration; false (and nothing changed) when
+  ## `sequence` is longer than `ExtraRestoreCapacity`.
+  if sequence.len > ExtraRestoreCapacity:
+    return false
+  gExtraResumeLen = 0
+  for i, c in sequence:
+    gExtraResume[i] = c
+  gExtraResumeLen = sequence.len
+  true
+
+proc extraResume*(): string =
+  ## The registered resume bytes (for a test).
+  result = newString(gExtraResumeLen)
+  for i in 0 ..< gExtraResumeLen:
+    result[i] = gExtraResume[i]
+
+proc takeResumed*(): bool =
+  ## Whether a stop (SIGTSTP) was continued since the last call: the
+  ## terminal was given back and taken again, so what it shows is not what
+  ## the application last drew — it must paint a whole frame.
+  result = gResumed
+  gResumed = false
+
 proc writeExtraRestore*(fd: cint = STDOUT_FILENO) =
   ## The registered bytes, written now — the normal exit's half of the one
   ## buffer. Leaves the registration in place.
@@ -285,6 +323,16 @@ proc onFatalSignal(sig: cint) {.noconv.} =
       discard sigaction(sig, gPreviousFatal[i], nil)
   discard kill(getpid(), sig)
 
+proc onSuspend(sig: cint) {.noconv.}
+  ## SIGTSTP — defined beside the SIGWINCH self-pipe it nudges.
+
+proc installSuspendHandler() =
+  var stop = Sigaction()
+  stop.sa_handler = onSuspend
+  discard sigemptyset(stop.sa_mask)
+  stop.sa_flags = 0
+  discard sigaction(SIGTSTP, stop, nil)
+
 proc installSignalHandlers() =
   if gSigHandlersInstalled: return
   gSigHandlersInstalled = true
@@ -296,6 +344,9 @@ proc installSignalHandlers() =
   discard sigaction(SIGTERM, sa, nil)
   discard sigaction(SIGHUP, sa, nil)
   discard sigaction(SIGQUIT, sa, nil)
+  # A STOP (`kill -TSTP`, a job-control suspend): the terminal is given back
+  # before the process stops, and taken again when it is continued.
+  installSuspendHandler()
   var fatal = Sigaction()
   fatal.sa_handler = onFatalSignal
   discard sigemptyset(fatal.sa_mask)
@@ -329,6 +380,7 @@ proc uninstallCtrlCHandler*() =
   discard sigaction(SIGTERM, sa, nil)
   discard sigaction(SIGHUP, sa, nil)
   discard sigaction(SIGQUIT, sa, nil)
+  discard sigaction(SIGTSTP, sa, nil)
 
 proc ctrlEventReceived*(): bool {.inline.} =
   ## True if a Ctrl-C / SIGINT / SIGTERM handler has fired since the last
@@ -412,6 +464,7 @@ proc enableRawMode*(fd: cint = STDIN_FILENO): RawMode =
     raiseOSError("tcsetattr (raw)")
   gActiveTty = fd
   gSavedTermios = saved
+  gRawTermios = raw
   gNeedsRestore = true
   installSignalHandlers()
   installAtexit()
@@ -701,6 +754,68 @@ proc uninstallWinchHandler*() =
   if gWinchPipeW >= 0:
     discard cClose(gWinchPipeW); gWinchPipeW = -1
   gWinchHandlerInstalled = false
+
+# ---------------------------------------------------------------------------
+# SIGTSTP: give the terminal back before stopping, take it again on SIGCONT
+# ---------------------------------------------------------------------------
+
+proc onSuspend(sig: cint) {.noconv.} =
+  ## A STOP. Async-signal-safe throughout (`write(2)`, `tcsetattr`,
+  ## `sigaction`, `sigprocmask`, `kill`). The restore every exit path writes
+  ## runs first, so the shell the user returns to has its screen, its
+  ## cursor and cooked input; then the process stops — the default action,
+  ## raised with SIGTSTP unblocked so it takes effect HERE, inside the
+  ## handler. When it is continued, `kill` returns: raw mode, the alternate
+  ## screen, mouse, paste, focus and extended keys are put back as they were,
+  ## then the application's own bytes (`setExtraResume`), and the SIGWINCH
+  ## self-pipe is nudged so a loop blocked in `select` wakes and paints a
+  ## whole frame (`takeResumed`).
+  let held = gNeedsRestore
+  let alt = gAltScreenActive
+  let mouse = gMouseActive
+  let paste = gPasteActive
+  let focus = gFocusActive
+  let keys = gKeyReportingActive
+  restoreTerminalSafe()
+  var dfl = Sigaction()
+  dfl.sa_handler = SIG_DFL
+  discard sigemptyset(dfl.sa_mask)
+  dfl.sa_flags = 0
+  discard sigaction(SIGTSTP, dfl, nil)
+  var unblock, before: Sigset
+  discard sigemptyset(unblock)
+  discard sigaddset(unblock, SIGTSTP)
+  discard sigprocmask(SIG_UNBLOCK, unblock, before)
+  discard kill(getpid(), SIGTSTP)
+  # Continued.
+  installSuspendHandler()
+  if held and gActiveTty >= 0:
+    discard tcSetAttr(gActiveTty, TCSAFLUSH, addr gRawTermios)
+    gNeedsRestore = true
+    if alt:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?1049h")
+      gAltScreenActive = true
+    if mouse:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?1000h\x1b[?1006h")
+      gMouseActive = true
+    if paste:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?2004h")
+      gPasteActive = true
+    if focus:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?1004h")
+      gFocusActive = true
+    if keys == 1:
+      writeAllSafe(STDOUT_FILENO, KittyPushDisambiguateSeq)
+    elif keys == 2:
+      writeAllSafe(STDOUT_FILENO, ModifyOtherKeysOnSeq)
+    gKeyReportingActive = keys
+    if gExtraResumeLen > 0:
+      discard cWrite(STDOUT_FILENO, cast[pointer](addr gExtraResume[0]),
+                     csize_t(gExtraResumeLen))
+    gResumed = true
+    if gWinchHandlerInstalled and gWinchPipeW >= 0:
+      var b: byte = 1
+      discard cWrite(gWinchPipeW, addr b, csize_t(1))
 
 # ---------------------------------------------------------------------------
 # Test-only hooks
