@@ -7,7 +7,9 @@ import std/os
 
 type
   ConsoleHandle = pointer
-  ConsoleMode* = uint32
+  ConsoleMode* = culong
+    ## Win32 `DWORD` is `unsigned long`; GCC >=14 errors on passing
+    ## `uint32*` where the real header expects `LPDWORD`.
   ConsoleBool = int32
   OwnedTestConsole* = object
     input, output: ConsoleHandle
