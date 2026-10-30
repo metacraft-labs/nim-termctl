@@ -30,7 +30,12 @@ import std/[atomics]
 
 type
   HANDLE* = pointer
-  DWORD = uint32
+  DWORD = culong
+    ## Win32 `DWORD` is `unsigned long`, a C type distinct from
+    ## `unsigned int` under LLP64 even though both are 32 bits. GCC
+    ## (>=14, e.g. the WinLibs 16.1.0 toolchain CI provisions) treats
+    ## `uint32*` passed where `LPDWORD` (`unsigned long*`) is expected
+    ## as an incompatible-pointer-type error, not a warning.
   BOOL = int32
   WORD = uint16
   SHORT = int16
@@ -74,14 +79,14 @@ const
 
 type
   CoordC {.importc: "COORD", header: "<windows.h>", pure, final.} = object
-    x: SHORT
-    y: SHORT
+    x {.importc: "X".}: SHORT
+    y {.importc: "Y".}: SHORT
 
   SmallRectC {.importc: "SMALL_RECT", header: "<windows.h>", pure, final.} = object
-    left: SHORT
-    top: SHORT
-    right: SHORT
-    bottom: SHORT
+    left {.importc: "Left".}: SHORT
+    top {.importc: "Top".}: SHORT
+    right {.importc: "Right".}: SHORT
+    bottom {.importc: "Bottom".}: SHORT
 
   ConsoleScreenBufferInfoC {.importc: "CONSOLE_SCREEN_BUFFER_INFO",
                              header: "<windows.h>", pure, final.} = object
