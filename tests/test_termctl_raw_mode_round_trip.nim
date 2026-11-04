@@ -1,5 +1,5 @@
 when defined(windows):
-  import std/[unittest, os, osproc, streams, strutils, monotimes, times]
+  import std/[unittest, strutils]
   import nim_termctl
   import windows_console_fixture
 
@@ -7,6 +7,7 @@ when defined(windows):
 
   proc runWindowsRawModeCases() =
     let console = openOwnedTestConsole()
+    countPrivateConsoleCases()
     suite "L3: raw-mode round-trip on a real private Win32 console":
       test "enableRawMode + destroy restores complete input/output modes":
         let pre = modes(console)
@@ -35,36 +36,18 @@ when defined(windows):
           check raw.savedInput == pre.input
           check raw.savedOutput == pre.output
         check modes(console) == pre
-    if programResult == 0:
-      echo childCompleted
+    reportPrivateConsoleCompletion(childCompleted, 3)
 
-  if paramCount() == 1 and paramStr(1) == rawConsoleChildArgument:
+  if isPrivateConsoleChild():
     runWindowsRawModeCases()
   else:
     suite "L3: isolated Windows raw-mode fixture":
       test "three real console cases complete in a retained child":
-        let child = startProcess(getAppFilename(), args = @[rawConsoleChildArgument],
-          options = {poStdErrToStdOut})
-        try:
-          # Nim's Windows waitForExit(timeout) can terminate with status0.
-          # Keep timeout evidence separate from the child's actual exit code.
-          let deadline = getMonoTime() + initDuration(seconds = 15)
-          while child.running() and getMonoTime() < deadline:
-            sleep(10)
-          let timedOut = child.running()
-          if timedOut:
-            child.terminate()
-          let exitCode = child.waitForExit()
-          let output = child.outputStream.readAll()
-          checkpoint output
-          check not timedOut
-          check exitCode == 0
-          check childCompleted in output
-        finally:
-          if child.running():
-            child.terminate()
-          discard child.waitForExit()
-          child.close()
+        let run = runPrivateConsoleChild()
+        checkpoint run.output
+        check not run.timedOut
+        check run.exitCode == 0
+        check childCompleted in run.output
 else:
   ## tests/test_termctl_raw_mode_round_trip.nim - L3 spec test.
   ##

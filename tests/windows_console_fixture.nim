@@ -1,9 +1,20 @@
-## Owned real Win32 console used only by the raw-mode test child.
+## Owned real Win32 console used only by the isolated Windows test children.
 ## No emulated terminal or product API replacement is used.
+##
+## Each Windows console test re-executes its own binary as a child that
+## detaches from the runner's console and allocates a private one, so the
+## product's console-mode changes never touch the parent's console. The
+## child is selected by an ENVIRONMENT variable, not by a command-line
+## argument: `std/unittest` treats every command-line argument as a test
+## filter (`testsFilters.incl(paramStr(i))` in `ensureInitialized`), so an
+## argument selector made the child run no test at all while still exiting
+## zero. The child also counts the cases that actually passed and reports
+## completion only when that count is the number the parent expects, so a
+## child that silently runs nothing can never satisfy the parent again.
 when not defined(windows):
   {.error: "windows_console_fixture is Windows-only".}
 
-import std/os
+import std/[os, osproc, streams, strtabs, monotimes, times, unittest]
 
 type
   ConsoleHandle = pointer
@@ -17,7 +28,11 @@ type
     active: bool
 
 const
-  rawConsoleChildArgument* = "--termctl-private-raw-console-child"
+  privateConsoleChildVariable* = "NIM_TERMCTL_PRIVATE_CONSOLE_CHILD"
+    ## Set (to `privateConsoleChildValue`) only in the isolated child's
+    ## environment; see the module comment for why it is not an argument.
+  privateConsoleChildValue = "1"
+  privateConsoleChildTimeout = initDuration(seconds = 15)
   stdInput = 0xfffffff6'u32
   stdOutput = 0xfffffff5'u32
   # Win32's documented INVALID_HANDLE_VALUE sentinel at this FFI boundary.
@@ -35,6 +50,88 @@ proc getConsoleMode(handle: ConsoleHandle; mode: ptr ConsoleMode): ConsoleBool {
 proc setConsoleMode(handle: ConsoleHandle; mode: ConsoleMode): ConsoleBool {.importc: "SetConsoleMode", header: "<windows.h>", stdcall.}
 
 proc `=copy`*(dest: var OwnedTestConsole; src: OwnedTestConsole) {.error.}
+
+proc isPrivateConsoleChild*(): bool =
+  ## True in the isolated child started by `runPrivateConsoleChild`. The
+  ## child must receive no arguments, or `std/unittest` would filter its
+  ## cases by them.
+  getEnv(privateConsoleChildVariable) == privateConsoleChildValue and
+    paramCount() == 0
+
+# ---------------------------------------------------------------------------
+# Child side: count the cases that really ran.
+# ---------------------------------------------------------------------------
+
+type
+  CaseCounter = ref object of OutputFormatter
+    ## Counts finished cases by status. A `ref` is what `std/unittest`'s
+    ## formatter interface requires; it never leaves this test fixture.
+    passed, failed, skipped: int
+
+method testEnded(counter: CaseCounter; testResult: TestResult) {.gcsafe.} =
+  case testResult.status
+  of TestStatus.OK: inc counter.passed
+  of TestStatus.FAILED: inc counter.failed
+  of TestStatus.SKIPPED: inc counter.skipped
+
+var gCaseCounter: CaseCounter
+
+proc countPrivateConsoleCases*() =
+  ## Call in the child before its first `suite`. Keeps the default console
+  ## formatter (its failure output is what the parent prints) and adds the
+  ## counter beside it: adding any formatter suppresses the implicit default.
+  gCaseCounter = CaseCounter()
+  addOutputFormatter(defaultConsoleFormatter())
+  addOutputFormatter(gCaseCounter)
+
+proc reportPrivateConsoleCompletion*(marker: string; expectedCases: int) =
+  ## Call in the child after its suites. Prints `marker` only when exactly
+  ## `expectedCases` cases passed and none failed or was skipped; otherwise
+  ## prints the counts and makes the child exit non-zero.
+  doAssert gCaseCounter != nil, "countPrivateConsoleCases was not called"
+  let c = gCaseCounter
+  if programResult == 0 and c.passed == expectedCases and c.failed == 0 and
+      c.skipped == 0:
+    echo marker
+  else:
+    echo "private console child incomplete: passed=", c.passed, " failed=",
+      c.failed, " skipped=", c.skipped, " expected=", expectedCases
+    if programResult == 0:
+      programResult = 1
+
+# ---------------------------------------------------------------------------
+# Parent side: run the child and collect everything it wrote.
+# ---------------------------------------------------------------------------
+
+type PrivateConsoleChildRun* = object
+  timedOut*: bool
+  exitCode*: int
+  output*: string
+
+proc runPrivateConsoleChild*(): PrivateConsoleChildRun =
+  ## Re-executes this test binary as the isolated private-console child,
+  ## with the parent's environment plus the child selector and NO arguments,
+  ## and waits up to 15 s for it. stdout and stderr are merged.
+  var env = newStringTable(modeCaseInsensitive)
+  for key, value in envPairs():
+    env[key] = value
+  env[privateConsoleChildVariable] = privateConsoleChildValue
+  let child = startProcess(getAppFilename(), env = env,
+    options = {poStdErrToStdOut})
+  try:
+    let deadline = getMonoTime() + privateConsoleChildTimeout
+    while child.running() and getMonoTime() < deadline:
+      sleep(10)
+    result.timedOut = child.running()
+    if result.timedOut:
+      child.terminate()
+    result.exitCode = child.waitForExit()
+    result.output = child.outputStream.readAll()
+  finally:
+    if child.running():
+      child.terminate()
+    discard child.waitForExit()
+    child.close()
 
 template destroyConsole(console: untyped) =
   if console.active:
@@ -57,7 +154,7 @@ proc modes*(console: OwnedTestConsole): tuple[input, output: ConsoleMode] =
     raise newException(IOError, "GetConsoleMode failed for owned test console")
 
 proc openOwnedTestConsole*(): OwnedTestConsole =
-  if paramCount() != 1 or paramStr(1) != rawConsoleChildArgument:
+  if not isPrivateConsoleChild():
     raise newException(IOError, "Private console fixture requires isolated test child")
   result.oldInput = getStdHandle(stdInput)
   result.oldOutput = getStdHandle(stdOutput)

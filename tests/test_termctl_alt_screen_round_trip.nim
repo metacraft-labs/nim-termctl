@@ -1,5 +1,5 @@
 when defined(windows):
-  import std/[unittest, os, osproc, streams, strutils, monotimes, times]
+  import std/[unittest, strutils]
   import nim_termctl
   import windows_console_fixture
 
@@ -18,6 +18,7 @@ when defined(windows):
     # belong to this private child, never the runner's parent console.
     let console = openOwnedTestConsole()
     discard modes(console)
+    countPrivateConsoleCases()
     suite "L3: real Windows VT output":
       test "enterAltScreen and destructor emit matching transitions":
         stdout.write beginAlt
@@ -43,39 +44,26 @@ when defined(windows):
           var focus = enableFocusReporting()
           check mouse.active and paste.active and focus.active
         echo endModes
-    if programResult == 0:
-      echo childCompleted
+    reportPrivateConsoleCompletion(childCompleted, 3)
 
   proc capturedWindowsVtOutput(): string =
-    let child = startProcess(getAppFilename(), args = @[rawConsoleChildArgument],
-      options = {poStdErrToStdOut})
-    try:
-      let deadline = getMonoTime() + initDuration(seconds = 15)
-      while child.running() and getMonoTime() < deadline:
-        sleep(10)
-      let timedOut = child.running()
-      if timedOut:
-        child.terminate()
-      let exitCode = child.waitForExit()
-      result = child.outputStream.readAll()
-      if timedOut or exitCode != 0 or childCompleted notin result:
-        raise newException(IOError, "Real Windows VT child failed: " & result)
-    finally:
-      if child.running():
-        child.terminate()
-      discard child.waitForExit()
-      child.close()
+    let run = runPrivateConsoleChild()
+    result = run.output
+    if run.timedOut or run.exitCode != 0 or childCompleted notin result:
+      raise newException(IOError, "Real Windows VT child failed: " & result)
 
   proc segment(output, first, last: string): string =
     let start = output.find(first)
     if start < 0:
-      raise newException(IOError, "Missing Windows VT begin marker")
+      raise newException(IOError, "Missing Windows VT begin marker " & first &
+        " in child output: " & output.escape)
     let finish = output.find(last, start + first.len)
     if finish < 0:
-      raise newException(IOError, "Missing Windows VT end marker")
+      raise newException(IOError, "Missing Windows VT end marker " & last &
+        " in child output: " & output.escape)
     result = output[start + first.len ..< finish]
 
-  if paramCount() == 1 and paramStr(1) == rawConsoleChildArgument:
+  if isPrivateConsoleChild():
     runWindowsVtCases()
   else:
     let output = capturedWindowsVtOutput()

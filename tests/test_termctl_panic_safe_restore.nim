@@ -1,5 +1,5 @@
 when defined(windows):
-  import std/[unittest, os, osproc, streams, strutils, monotimes, times]
+  import std/[unittest, strutils]
   import nim_termctl
   import windows_console_fixture
 
@@ -7,6 +7,7 @@ when defined(windows):
 
   proc runWindowsCases() =
     let console = openOwnedTestConsole()
+    countPrivateConsoleCases()
     suite "L3: panic-safe restore on real Windows console":
       test "actual assertion unwind restores complete console modes":
         let pre = modes(console)
@@ -20,34 +21,18 @@ when defined(windows):
           caught = true
         check caught
         check modes(console) == pre
-    if programResult == 0:
-      echo childCompleted
+    reportPrivateConsoleCompletion(childCompleted, 1)
 
-  if paramCount() == 1 and paramStr(1) == rawConsoleChildArgument:
+  if isPrivateConsoleChild():
     runWindowsCases()
   else:
     suite "L3: retained private Windows console fixture":
       test "all native cases complete with actual console and child wait":
-        let child = startProcess(getAppFilename(), args = @[rawConsoleChildArgument],
-          options = {poStdErrToStdOut})
-        try:
-          let deadline = getMonoTime() + initDuration(seconds = 15)
-          while child.running() and getMonoTime() < deadline:
-            sleep(10)
-          let timedOut = child.running()
-          if timedOut:
-            child.terminate()
-          let exitCode = child.waitForExit()
-          let output = child.outputStream.readAll()
-          checkpoint output
-          check not timedOut
-          check exitCode == 0
-          check childCompleted in output
-        finally:
-          if child.running():
-            child.terminate()
-          discard child.waitForExit()
-          child.close()
+        let run = runPrivateConsoleChild()
+        checkpoint run.output
+        check not run.timedOut
+        check run.exitCode == 0
+        check childCompleted in run.output
 else:
   ## tests/test_termctl_panic_safe_restore.nim - L3 spec test.
   ##
