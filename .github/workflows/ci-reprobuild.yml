@@ -1,20 +1,18 @@
 name: CI (reprobuild)
 
-# Additive side-by-side CI run that re-plays the project's
-# deterministic dev env through reprobuild instead of `nix develop` or
-# `env.ps1`. Runs alongside the existing `ci.yml` (`nix`) and any
-# `windows-build.yml` (`windows-diy`) entries so regressions in either
-# of the older paths still gate merges — see
-# `codetracer-specs/Repo-Requirements.md` §2.9 and
-# `metacraft-dev-guidelines/policies/ci-shared-dev-env.md` §4 for the
-# rollout shape.
-#
-# The `setup-dev-env` composite action accepts `env-flavor: reprobuild`
-# (target state per the policy). When the action's reprobuild branch
-# lands, this workflow exercises it end-to-end on every supported
-# host without any other repo-side change.
+# Re-plays the project's deterministic dev env through reprobuild on all
+# five target legs. This workflow is deliberately thin: the shared
+# `setup-dev-env` action materialises the environment `repro.nim`
+# declares, and the job then runs `repro build` / `repro test` plus the
+# legacy `just` cross-checks inside it. Tools the build needs belong in
+# `repro.nim`, never here -- see
+# metacraft-dev-guidelines/policies/ci-shared-dev-env.md §1, §2 and §5,
+# and repo-requirements.md §5 for the five-leg requirement.
 
 on:
+  workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main, dev, stable]
   pull_request:
@@ -22,8 +20,7 @@ on:
 
 # Cancel superseded PR runs only: a new push to a PR makes its previous run
 # moot, and stale runs otherwise hold scarce self-hosted runners. Every other
-# event (mainline push, merge_group, tag, dispatch, schedule) gets a group
-# unique to its run_id, so it is never cancelled and never cancels anything.
+# event gets a group unique to its run_id, so it is never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -38,31 +35,34 @@ jobs:
           - os: linux
             arch: x64
             runner: [self-hosted, linux, x64]
+            just-test: test
           - os: linux
             arch: arm64
             runner: [self-hosted, linux, arm64]
+            just-test: test
           - os: macos
             arch: arm64
             runner: [self-hosted, macos, arm64]
+            just-test: test
           - os: windows
             arch: x64
             runner: [self-hosted, windows, x64]
+            just-test: test-windows
           - os: windows
             arch: arm64
             runner: [self-hosted, windows, arm64]
+            just-test: test-windows
     runs-on: ${{ matrix.runner }}
+    env:
+      # Windows has no Nix; its declared tools come from the reprobuild
+      # tarball realizations. The POSIX legs realize them through Nix.
+      REPRO_TOOL_PROVISIONING: ${{ matrix.os == 'windows' && 'tarball' || 'nix' }}
     steps:
       - uses: actions/checkout@v4
 
-      # Mint a GitHub App installation token via the CI Token Provider
-      # app so the reprobuild flake/sibling steps can clone private
-      # metacraft-labs repos (codetracer-native-recorder, runquota,
-      # repo-workspaces, etc.).  GitHub free plan restricts org-level
-      # secrets with visibility ALL from being readable in private repos,
-      # so we mint per-run tokens from the app secrets stored at repo
-      # level (CI_TOKEN_PROVIDER_APP_ID + CI_TOKEN_PROVIDER_PRIVATE_KEY).
-      # Minted before the sibling clones so the workspace-lock manifest
-      # checkout (private metacraft-manifests) can authenticate.
+      # A GitHub App installation token lets setup-dev-env clone private
+      # metacraft-labs repositories (the free plan does not expose org-level
+      # secrets to every repository).
       - name: Mint installation token for cross-repo sibling clones
         id: ci_token
         uses: actions/create-github-app-token@v2
@@ -71,123 +71,30 @@ jobs:
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
 
-      - name: Install Nix for the declared platform shell
-        if: runner.os != 'Windows'
-        uses: metacraft-labs/metacraft-github-actions/setup-nix@dev
-        with:
-          gh-token: ${{ steps.ci_token.outputs.token }}
-
-      - name: Expose the declared non-SIP shell
-        if: runner.os != 'Windows'
-        run: |
-          nix develop --command bash -c '
-            shell_path="$(command -v bash)"
-            case "$shell_path" in
-              /nix/store/*/bin/bash) dirname "$shell_path" >> "$GITHUB_PATH" ;;
-              *) echo "Expected declared Nix bash, got $shell_path" >&2; exit 1 ;;
-            esac
-          '
-
       - name: Setup dev env (reprobuild flavor)
-        # setup-dev-env clones the siblings listed in .github/sibling-repos
-        # if declared, at committed workspace-lock revisions; this pure
-        # terminal-control library has no sibling source dependency.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: reprobuild
-          repro-from-source: ${{ runner.os != 'Windows' && 'true' || 'false' }}
-          repro-build-pin: "76659f5730ecf698b1963c656494d2cb66eb256d"
           gh-token: ${{ steps.ci_token.outputs.token }}
 
-      - name: Report measured Repro source identity
-        if: runner.os != 'Windows'
-        run: |
-          pwd
-          git rev-parse HEAD
-          engine_source="$(git -C .reprobuild-src rev-parse HEAD)"
-          echo "Repro source: $engine_source"
-          test "$engine_source" = 76659f5730ecf698b1963c656494d2cb66eb256d
-          test -z "$(git -C .reprobuild-src status --porcelain)"
-          test "$(command -v repro)" = "$GITHUB_WORKSPACE/.reprobuild-src/build/bin/repro"
-          test "${REPROBUILD_NIX_DAEMON_BIN:?missing source daemon helper}" = "$GITHUB_WORKSPACE/.reprobuild-src/build/bin/reprobuild-nix-daemon"
-          test -x "$REPROBUILD_NIX_DAEMON_BIN"
-          "$REPROBUILD_NIX_DAEMON_BIN" --help
-          printf 'daemon helper: %s\n' "$REPROBUILD_NIX_DAEMON_BIN"
-          command -v repro
-          repro --version
-
-      - name: Provision declared native Windows x64 C compiler
-        if: runner.os == 'Windows' && runner.arch == 'X64'
-        shell: pwsh
-        run: ./ci/ensure-windows-gcc.ps1
-
-      - name: Isolate Linux interface diagnostics in an owned work root
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          python3 - <<'PYDIAG'
-          import json, os, pathlib, tempfile
-          parent = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
-          work = pathlib.Path(tempfile.mkdtemp(prefix='termctl-repro-work-', dir=parent))
-          assert work.resolve(strict=True).parent == parent and not work.is_symlink()
-          assert not any(work.iterdir())
-          value = str(work)
-          assert '\n' not in value and '\r' not in value
-          with open(os.environ['GITHUB_ENV'], 'a') as output:
-              output.write('REPROBUILD_WORK_ROOT=' + value + '\n')
-          evidence = pathlib.Path('.repro/interface-diagnostics-root.json')
-          evidence.parent.mkdir(exist_ok=True)
-          evidence.write_text(json.dumps({'configuredWorkRoot': value, 'resolvedWorkRoot': str(work.resolve(strict=True)), 'candidate': os.environ['GITHUB_SHA'], 'selectedReproSource': '76659f5730ecf698b1963c656494d2cb66eb256d'}, indent=2) + '\n')
-          PYDIAG
-
       - name: repro build
-        # Builds the conventional `build` collection declared in
-        # `repro.nim`. Verifies the terminal-control library graph
-        # materialises through the same declared compiler environment.
-        run: dev-exec repro build ${{ runner.os != 'Windows' && '--tool-provisioning=nix' || '' }}
+        run: dev-exec repro build
 
       - name: repro test
-        # Materialises the `test` collection.
-        run: dev-exec repro test ${{ runner.os != 'Windows' && '--tool-provisioning=nix' || '' }}
+        run: dev-exec repro test
 
       - name: just build (cross-check)
-        # Re-runs the legacy `just build` path inside the same env so
-        # we catch silent divergences between `repro build` outputs
-        # and what the dev shell + Justfile produce today.
         run: dev-exec just build
 
+      # On Windows the documented lane is `just test-windows`: the shared
+      # suite plus the Windows-only console tests and the control-handler
+      # ownership probes (real console events in isolated children).
       - name: just test (cross-check)
-        run: dev-exec just test
+        run: dev-exec just ${{ matrix.just-test }}
 
-      # Diagnostics on failure. Three things below are load-bearing:
-      #
-      # 1. `include-hidden-files: true`. actions/upload-artifact@v4 defaults this
-      #    input to false, and @actions/glob then skips any entry it traverses whose
-      #    own basename starts with "." (internal-globber.ts:
-      #    `if (options.excludeHiddenFiles && path.basename(item.path).match(/^\./))
-      #    continue`). The old `path: .repro/` made `.repro` itself the search root,
-      #    so it was skipped outright and this step logged
-      #      "No files were found with the provided path: target/ .repro/"
-      #    which `if-no-files-found: ignore` then swallowed. Net effect: the build
-      #    engine's per-action stdio captures -- `<outDir>/build-engine-cache/
-      #    actions/<actionId>.stderr.log`, see repro_build_engine.nim -- have never
-      #    been uploaded from any leg of this workflow, on any platform.
-      # 2. Narrow paths. A whole `.repro/` tree measures ~1.1 GiB (dominated by
-      #    build-engine-cache/monitor-depfiles and dependency-evidence); the failure
-      #    report plus the per-action logs are ~600 KiB. `target/` was dropped: it is
-      #    a build-output tree rather than a log tree, it matches nothing in the Nim
-      #    repos, and where it does match it would permanently mask the warning below.
-      # 3. `if-no-files-found: warn` (the action's own default). This step only runs
-      #    on failure, so a warning costs nothing -- and it is exactly what would have
-      #    surfaced (1) years ago instead of hiding it behind a green step.
-      #
-      # Context, 2026-09: no leg of this workflow is green on ANY platform. Census of
-      # the job records: linux-x64 77 failure / 19 cancelled / 0 success, linux-arm64
-      # 77/19/0, macos-arm64 75/25/0, windows-x64 61/35/0. The only two successes on
-      # record are from 2026-07-06, under the pre-rename job names. The arm64 leg
-      # fails earlier than x64, and x64 fails for an unrelated project-level reason
-      # (`cannot open file: results`, codetracer_ct_print.nim(24, 8)). These
-      # artifacts are the only way to find out why any of it actually fails.
+      # Per-action stdio captures and the failure report. Hidden files must be
+      # included explicitly: actions/upload-artifact@v4 skips any path whose
+      # basename starts with "." (so `.repro/` would otherwise be skipped).
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -196,22 +103,6 @@ jobs:
           path: |
             .repro/build/*/build-failure-report.json
             .repro/build/*/build-engine-cache/actions/
-            .repro/build/*/build-engine-cache/runquota-results/*.json
-            .repro/interface-diagnostics-root.json
-          include-hidden-files: true
-          retention-days: 7
-          if-no-files-found: warn
-
-      - name: Upload isolated Linux interface failure diagnostics
-        if: failure() && runner.os == 'Linux' && env.REPROBUILD_WORK_ROOT != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: reprobuild-interface-logs-${{ matrix.os }}-${{ matrix.arch }}
-          path: |
-            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-failure-report.json
-            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-engine-cache/actions/*.stdout.log
-            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-engine-cache/actions/*.stderr.log
-            ${{ env.REPROBUILD_WORK_ROOT }}/worktrees/*/build/*/build-engine-cache/runquota-results/*.json
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
