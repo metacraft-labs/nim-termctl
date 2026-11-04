@@ -163,11 +163,14 @@ package nim_termctl:
   uses:
     # Toolchain floor — the PATH-resolvable binaries the build needs.
     # ``nim`` compiles every test binary (the ``buildNimUnittest.build``
-    # edges below); the nimble file requires ``nim >= 2.0.0``. ``gcc`` is
-    # the C back-end ``nim c`` shells out to. Sufficient for the path-mode
-    # resolver under ``nix develop``.
+    # edges below); the nimble file requires ``nim >= 2.0.0``. Nim uses
+    # clang on macOS and gcc on the other declared platforms; bind the
+    # actual backend identity to every compile action below.
     "nim >=2.0"
-    "gcc >=12"
+    when defined(macosx):
+      "clang >=14"
+    else:
+      "gcc >=12"
 
   # Library declaration — the ``src/`` tree the ``Justfile`` puts on
   # ``--path:src`` is importable when this package is consumed via
@@ -181,7 +184,7 @@ package nim_termctl:
     # halves collect into ``test-builds``; EXECUTE halves collect into
     # ``test`` (each execute edge transitively depends on its build edge).
     #
-    # This repo has NO ``config.nims``; the ``Justfile`` compiles every
+    # The ``Justfile`` compiles every
     # test with ``--path:src --path:tests``. The tests ``import
     # nim_termctl`` (src/) and the POSIX tests ``import test_helpers``
     # (tests/), so ``paths = @["src", "tests"]`` reproduces that search
@@ -206,6 +209,10 @@ package nim_termctl:
         defines = @["release"],
         paths = @["src", "tests"],
         actionId = "nim_termctl.test_build." & stem)
+      when defined(macosx):
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["clang"])
+      else:
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       buildActions.add(edge.action)
       # ``registerImplicitName = false``: the BUILD edge already owns the
       # binary basename as its implicit target name; the explicit

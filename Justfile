@@ -292,6 +292,14 @@ test-windows:
         --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         -r $t 2>&1 | tee -a test-logs/windows.log; \
     done
+    @echo "[windows-control-ownership] original event controls and automatic owner lifetime"
+    nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        --nimcache:{{nimcache}}/tests/windows_ctrl_event_control_r \
+        -o:test-logs/windows_ctrl_event_control.exe tests/windows_ctrl_event_control.nim
+    nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        --nimcache:{{nimcache}}/tests/ctrl_owner_lifetime_controls_r \
+        -o:test-logs/ctrl_owner_lifetime_controls.exe tests/ctrl_owner_lifetime_controls.nim
+    pwsh -NoProfile -File ci/run-windows-control-probes.ps1 -OwnerImage test-logs/ctrl_owner_lifetime_controls.exe -EventImage test-logs/windows_ctrl_event_control.exe -MemoryManager orc -OutputDirectory test-logs
 
 # Entering the dev shell from another git repository must write nothing there.
 # Runs `nix develop`, so it is not part of the in-shell test recipes.
