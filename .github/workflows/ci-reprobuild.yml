@@ -76,6 +76,10 @@ jobs:
         with:
           env-flavor: reprobuild
           gh-token: ${{ steps.ci_token.outputs.token }}
+          # Lets setup-dev-env re-mint the Nix GitHub credential before the
+          # installation token expires; the Windows arm64 legs outlast it.
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
 
       - name: repro build
         run: dev-exec repro build
