@@ -37,6 +37,17 @@ proc awaitCount(counter: var Atomic[int]; expected: int) =
   while counter.load() != expected and getMonoTime() < deadline: sleep(1)
   doAssert counter.load() == expected
 
+proc installAutomaticRoot() {.noinline.} =
+  ## Installs the legacy registration from a frame that returns before the
+  ## scenario continues. The callback temporary passed to
+  ## installCtrlCHandler lives until the end of its caller's scope; created
+  ## inline in a branch that then calls quit(0), that temporary is never
+  ## destroyed (quit does not unwind), so it kept the probe's captured root
+  ## alive after the product released its own and the probe reported a
+  ## missing destruction (exit 91). Here the only remaining reference is the
+  ## product's main-owner registration, which is what the probe measures.
+  installCtrlCHandler(makeRootedCallback(addr ownerStats))
+
 proc runScenario(scenario: string) =
   case scenario
   of "lexical-captured-identity":
@@ -97,7 +108,7 @@ proc runScenario(scenario: string) =
   of "automatic-main-return", "automatic-main-quit":
     ownerStats.expectedThread.store(int(currentThread()))
     automaticExitExpected = true
-    installCtrlCHandler(makeRootedCallback(addr ownerStats))
+    installAutomaticRoot()
     doAssert signalEventHandle() != nil
     # No manual uninstall/drain. The probe's real later atexit observer checks
     # the root destructor ran on the main owner and emits the required marker.
