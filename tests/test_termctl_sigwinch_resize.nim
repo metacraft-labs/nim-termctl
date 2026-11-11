@@ -46,7 +46,10 @@ when defined(windows):
           uninstallWinchHandler()
           uninstallCtrlCHandler()
         check signalEventHandle() != nil
-        check handles() == baseline + 1
+        # The control owner (ctrl_owner.c, tc_ctrl_prepare) holds exactly two
+        # kernel events: the wakeup event signalEventHandle() borrows, and the
+        # drain event its retirement waits on.
+        check handles() == baseline + 2
         discard pollWindowBufferSize()
         check injectWindowBufferSizeEvent(120, 40)
         check waitForHandle(consoleInputHandle(), 1000) == 0
