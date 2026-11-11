@@ -131,12 +131,9 @@ const portableTestSpecs: seq[TermctlTestSpec] = @[
     binary: "build/test-bin/test_windows_ctrl_c_handler"),
   TermctlTestSpec(source: "tests/test_windows_window_resize.nim",
     binary: "build/test-bin/test_windows_window_resize"),
-]
-
-const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
-  # These ``import std/posix`` (most also ``std/termios``) unconditionally
-  # — they build + run on Linux/macOS but not Windows. Gated
-  # ``when not defined(windows)`` at extraction below.
+  # The terminal-control suites: a POSIX branch on a real pty, and a Windows
+  # branch that runs the same contracts against a real private Win32 console
+  # in an isolated child (``tests/windows_console_fixture.nim``).
   TermctlTestSpec(source: "tests/test_api_invariants.nim",
     binary: "build/test-bin/test_api_invariants"),
   TermctlTestSpec(source: "tests/test_termctl_raw_mode_round_trip.nim",
@@ -149,6 +146,17 @@ const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
     binary: "build/test-bin/test_termctl_panic_safe_restore"),
   TermctlTestSpec(source: "tests/test_termctl_sigwinch_resize.nim",
     binary: "build/test-bin/test_termctl_sigwinch_resize"),
+]
+
+const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
+  # These ``import std/posix`` (and ``std/termios``) unconditionally and
+  # drive POSIX-only machinery (signals, termios, ``openpty``) — they build
+  # + run on Linux/macOS but not Windows. Gated ``when not defined(windows)``
+  # at extraction below. The Justfile's ``posix-only-tests`` is the same set.
+  TermctlTestSpec(source: "tests/test_termctl_key_reporting_restore.nim",
+    binary: "build/test-bin/test_termctl_key_reporting_restore"),
+  TermctlTestSpec(source: "tests/test_termctl_extra_restore.nim",
+    binary: "build/test-bin/test_termctl_extra_restore"),
   TermctlTestSpec(source: "tests/test_termctl_no_leaks.nim",
     binary: "build/test-bin/test_termctl_no_leaks"),
 ]

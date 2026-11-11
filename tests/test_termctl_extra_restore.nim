@@ -12,8 +12,11 @@ import std/[os, posix, strutils, termios, unittest]
 
 import nim_termctl
 
+# openpty(3) is declared in <pty.h> on Linux and in <util.h> on macOS/BSD.
+const ptyHeader = when defined(macosx) or defined(bsd): "<util.h>" else: "<pty.h>"
+
 proc openpty(amaster, aslave: ptr cint; name: cstring; termp: pointer;
-             winp: pointer): cint {.importc, header: "<pty.h>".}
+             winp: pointer): cint {.importc, header: ptyHeader.}
 
 const
   Sequence = "\e[?2027l\e[?2026l\e[?1016l\e[?1003l"
