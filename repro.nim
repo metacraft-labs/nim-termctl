@@ -171,6 +171,13 @@ package nim_termctl:
       "clang >=14"
     else:
       "gcc >=12"
+    # The `just` cross-checks run inside this environment on every leg. On
+    # Linux and macOS the flake dev shell already supplies both tools; on
+    # Windows nothing else does, so they are declared here (as
+    # nim-stackable-hooks does). `sh` supplies the bash the Justfile's
+    # `set shell` names.
+    "just >=1"
+    "sh"
 
   # Library declaration — the ``src/`` tree the ``Justfile`` puts on
   # ``--path:src`` is importable when this package is consumed via
