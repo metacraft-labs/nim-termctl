@@ -62,6 +62,20 @@ proc readAll(fd: cint; timeoutMs: int): string =
     else:
       waited += 50
 
+proc waitReading(pid: Pid; master: cint; status: var cint;
+                 options: cint = 0): string =
+  ## waitpid while draining the master, as a real terminal emulator does.
+  ## The restore ends with tcsetattr(TCSAFLUSH), which waits for the output
+  ## already written to reach the other side. On macOS that blocks until
+  ## the master reads it, so a parent that only reads after waitpid
+  ## returns deadlocks with its child (m4, at ff73591: the child blocked in
+  ## tcsetattr inside the SIGTERM handler, the parent in wait4).
+  while true:
+    result.add readAll(master, 50)
+    let r = waitpid(pid, status, options or WNOHANG)
+    if r == pid: break
+    doAssert r == 0, "waitpid failed"
+
 proc spawnChild(mode: string): tuple[pid: Pid; master: cint; seen: string] =
   var master, slave: cint
   doAssert openpty(addr master, addr slave, nil, nil, nil) == 0
@@ -93,7 +107,7 @@ proc runChild(mode: string; kill: bool; sig = SIGTERM): string =
   if kill:
     discard posix.kill(pid, sig)
   var status: cint
-  discard waitpid(pid, status, 0)
+  seen.add waitReading(pid, master, status)
   seen.add readAll(master, 300)
   discard close(master)
   seen
@@ -130,9 +144,9 @@ suite "setExtraRestore":
     discard posix.kill(pid, SIGTSTP)
     var status: cint
     # The child STOPS (WUNTRACED reports it) — after writing the restore.
-    check waitpid(pid, status, WUNTRACED) == pid
+    var stopped = waitReading(pid, master, status, WUNTRACED)
     check WIFSTOPPED(status)
-    let stopped = readAll(master, 300)
+    stopped.add readAll(master, 300)
     check stopped.contains(Sequence)
     check not stopped.contains(Resume)
     # Continued: raw mode back, the application's modes back, and the
@@ -147,7 +161,8 @@ suite "setExtraRestore":
     check back.contains("RESUMED RAW")
     # And it still restores on the way out.
     discard posix.kill(pid, SIGTERM)
-    discard waitpid(pid, status, 0)
-    check readAll(master, 300).contains(Sequence)
+    var last = waitReading(pid, master, status)
+    last.add readAll(master, 300)
+    check last.contains(Sequence)
     discard close(master)
     discard seen
