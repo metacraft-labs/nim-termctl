@@ -304,7 +304,7 @@ test-windows:
     nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
         --nimcache:{{nimcache}}/tests/ctrl_owner_lifetime_controls_r \
         -o:test-logs/ctrl_owner_lifetime_controls.exe tests/ctrl_owner_lifetime_controls.nim
-    pwsh -NoProfile -File ci/run-windows-control-probes.ps1 -OwnerImage test-logs/ctrl_owner_lifetime_controls.exe -EventImage test-logs/windows_ctrl_event_control.exe -MemoryManager orc -OutputDirectory test-logs
+    pwsh -NoProfile -ExecutionPolicy Bypass -File ci/run-windows-control-probes.ps1 -OwnerImage test-logs/ctrl_owner_lifetime_controls.exe -EventImage test-logs/windows_ctrl_event_control.exe -MemoryManager orc -OutputDirectory test-logs
 
 # Entering the dev shell from another git repository must write nothing there.
 # Runs `nix develop`, so it is not part of the in-shell test recipes.
