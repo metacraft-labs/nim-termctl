@@ -52,8 +52,34 @@ proc cWrite(fd: cint; buf: pointer; count: csize_t): clong
 proc cRead(fd: cint; buf: pointer; count: csize_t): clong
   {.importc: "read", header: "<unistd.h>".}
 
-proc cPipe2(p: ptr cint; flags: cint): cint
-  {.importc: "pipe2", header: "<unistd.h>".}
+when defined(linux):
+  proc cPipe2(p: ptr cint; flags: cint): cint
+    {.importc: "pipe2", header: "<unistd.h>".}
+
+proc openSelfPipe(fds: var array[2, cint]): OSErrorCode =
+  ## A pipe whose two ends are non-blocking and close-on-exec. Linux has
+  ## `pipe2(2)`, which sets both atomically. macOS has no `pipe2`
+  ## (https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/pipe.2.html),
+  ## so there the flags are set with `fcntl(2)` right after `pipe(2)`.
+  ## The window in between only matters to a concurrent `fork`+`exec`,
+  ## which could inherit the two descriptors; they carry no secret.
+  ## Returns `OSErrorCode(0)` on success, else the failing call's errno
+  ## (captured before any cleanup can overwrite it).
+  when defined(linux):
+    if cPipe2(addr fds[0], O_NONBLOCK or O_CLOEXEC) != 0:
+      return osLastError()
+  else:
+    if pipe(fds) != 0:
+      return osLastError()
+    for fd in fds:
+      let fl = fcntl(fd, F_GETFL)
+      if fl < 0 or fcntl(fd, F_SETFL, fl or O_NONBLOCK) < 0 or
+          fcntl(fd, F_SETFD, FD_CLOEXEC) < 0:
+        result = osLastError()
+        discard posix.close(fds[0])
+        discard posix.close(fds[1])
+        return
+  result = OSErrorCode(0)
 
 proc cClose(fd: cint): cint
   {.importc: "close", header: "<unistd.h>".}
@@ -730,8 +756,9 @@ proc installWinchHandler*() =
     return
   gWinchHandlerInstalled = true
   var fds: array[2, cint]
-  if cPipe2(addr fds[0], O_NONBLOCK or O_CLOEXEC) != 0:
-    raiseOSError("pipe2 (winch)")
+  let pipeError = openSelfPipe(fds)
+  if pipeError != OSErrorCode(0):
+    raiseOSError(pipeError, "self-pipe (winch)")
   gWinchPipeR = fds[0]
   gWinchPipeW = fds[1]
   var sa = Sigaction()
