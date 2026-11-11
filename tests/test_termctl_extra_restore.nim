@@ -8,7 +8,7 @@
 ## No mocks: a real pty (`openpty`), a real child process that enables raw
 ## mode and registers the bytes, and the bytes read off the pty master.
 
-import std/[os, posix, strutils, termios, unittest]
+import std/[os, posix, strutils, termios, unittest, volatile]
 
 import nim_termctl
 
@@ -37,8 +37,12 @@ proc childMain(mode: string) =
   if mode == "segv":
     # A real fault, not a `kill`: the crash handler restores, then the
     # runtime's own handler (or the default) ends the process.
+    # A volatile store: a plain write through a constant nil pointer is
+    # undefined behaviour that clang at -O3 is free to delete, and on macOS
+    # it did, so the child never faulted and waited forever (m4, at
+    # 6025f07). The volatile store must be emitted and really faults.
     let p = cast[ptr int](0)
-    p[] = 1
+    volatileStore(p, 1)
   # Wait to be killed — or stopped and continued.
   while true:
     if takeResumed():
