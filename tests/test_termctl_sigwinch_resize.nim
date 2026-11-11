@@ -23,13 +23,14 @@ when defined(windows):
 
   proc currentStandardHandle(which: uint32): pointer {.importc: "GetStdHandle", header: "<windows.h>", stdcall.}
   proc currentProcess(): pointer {.importc: "GetCurrentProcess", header: "<windows.h>", stdcall.}
-  proc processHandleCount(process: pointer; count: ptr uint32): int32 {.importc: "GetProcessHandleCount", header: "<windows.h>", stdcall.}
+  # PDWORD is `unsigned long *` in windows.h; GCC >= 14 rejects `unsigned int *`.
+  proc processHandleCount(process: pointer; count: ptr culong): int32 {.importc: "GetProcessHandleCount", header: "<windows.h>", stdcall.}
   proc waitForHandle(handle: pointer; milliseconds: uint32): uint32 {.importc: "WaitForSingleObject", header: "<windows.h>", stdcall.}
   proc consoleInfo(handle: pointer; info: ptr WinConsoleInfo): int32 {.importc: "GetConsoleScreenBufferInfo", header: "<windows.h>", stdcall.}
   proc largestWindow(handle: pointer): WinCoord {.importc: "GetLargestConsoleWindowSize", header: "<windows.h>", stdcall.}
   proc setWindow(handle: pointer; absolute: int32; rectangle: ptr WinRect): int32 {.importc: "SetConsoleWindowInfo", header: "<windows.h>", stdcall.}
 
-  proc handles(): uint32 =
+  proc handles(): culong =
     if processHandleCount(currentProcess(), addr result) == 0:
       raise newException(IOError, "GetProcessHandleCount failed")
 

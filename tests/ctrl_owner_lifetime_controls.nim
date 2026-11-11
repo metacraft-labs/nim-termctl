@@ -20,7 +20,8 @@ proc generate(kind, group: uint32): int32
 proc cFatalMarker(text: cstring): cint {.importc: "puts", header: "<stdio.h>", cdecl, raises: [].}
 proc cFlushFatal(stream: pointer): cint {.importc: "fflush", header: "<stdio.h>", cdecl, raises: [].}
 proc processHandle(): pointer {.importc: "GetCurrentProcess", header: "<windows.h>", stdcall.}
-proc handleCount(process: pointer; count: ptr uint32): int32
+# PDWORD is `unsigned long *` in windows.h; GCC >= 14 rejects `unsigned int *`.
+proc handleCount(process: pointer; count: ptr culong): int32
   {.importc: "GetProcessHandleCount", header: "<windows.h>", stdcall.}
 proc `=copy`(target: var KernelEvent; source: KernelEvent) {.error.}
 proc `=destroy`(event: var KernelEvent) =
@@ -30,7 +31,7 @@ proc `=destroy`(event: var KernelEvent) =
 proc newEvent(): KernelEvent =
   result.handle = createEvent(nil, 1, 0, nil)
   doAssert result.handle != nil
-proc handles(): uint32 = doAssert handleCount(processHandle(), addr result) != 0
+proc handles(): culong = doAssert handleCount(processHandle(), addr result) != 0
 proc awaitCount(counter: var Atomic[int]; expected: int) =
   let deadline = getMonoTime() + initDuration(seconds = 5)
   while counter.load() != expected and getMonoTime() < deadline: sleep(1)
