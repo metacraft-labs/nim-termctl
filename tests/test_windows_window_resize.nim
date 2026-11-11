@@ -38,7 +38,11 @@ else:
 
       test "WINDOW_BUFFER_SIZE_EVENT round-trip via WriteConsoleInputW":
         installWinchHandler()
-        defer: uninstallWinchHandler()
+        defer:
+          uninstallWinchHandler()
+          # installWinchHandler also installs the Ctrl wakeup; the two have
+          # separate lifecycles, so release the control owner here too.
+          uninstallCtrlCHandler()
 
         # Drain anything that may already be queued (the runner may have
         # produced a stray event during startup).
@@ -54,7 +58,11 @@ else:
 
       test "drain coalesces multiple resize records into the latest size":
         installWinchHandler()
-        defer: uninstallWinchHandler()
+        defer:
+          uninstallWinchHandler()
+          # installWinchHandler also installs the Ctrl wakeup; the two have
+          # separate lifecycles, so release the control owner here too.
+          uninstallCtrlCHandler()
 
         discard pollWindowBufferSize()
 
@@ -72,7 +80,11 @@ else:
 
       test "no-op poll returns hadResize=false":
         installWinchHandler()
-        defer: uninstallWinchHandler()
+        defer:
+          uninstallWinchHandler()
+          # installWinchHandler also installs the Ctrl wakeup; the two have
+          # separate lifecycles, so release the control owner here too.
+          uninstallCtrlCHandler()
         # Drain anything pending first.
         discard pollWindowBufferSize()
         let r = pollWindowBufferSize()
