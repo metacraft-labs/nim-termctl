@@ -52,7 +52,9 @@ foreach ($case in $cases) {
   $image = $images[$case.image]
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $image.file.FullName
-  $start.ArgumentList.Add('--termctl-private-raw-console-child')
+  # tests/windows_console_fixture.nim selects its private-console child by
+  # environment and requires no arguments.
+  $start.Environment['NIM_TERMCTL_PRIVATE_CONSOLE_CHILD'] = '1'
   $start.UseShellExecute = $false
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
