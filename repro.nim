@@ -131,12 +131,9 @@ const portableTestSpecs: seq[TermctlTestSpec] = @[
     binary: "build/test-bin/test_windows_ctrl_c_handler"),
   TermctlTestSpec(source: "tests/test_windows_window_resize.nim",
     binary: "build/test-bin/test_windows_window_resize"),
-]
-
-const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
-  # These ``import std/posix`` (most also ``std/termios``) unconditionally
-  # — they build + run on Linux/macOS but not Windows. Gated
-  # ``when not defined(windows)`` at extraction below.
+  # The terminal-control suites: a POSIX branch on a real pty, and a Windows
+  # branch that runs the same contracts against a real private Win32 console
+  # in an isolated child (``tests/windows_console_fixture.nim``).
   TermctlTestSpec(source: "tests/test_api_invariants.nim",
     binary: "build/test-bin/test_api_invariants"),
   TermctlTestSpec(source: "tests/test_termctl_raw_mode_round_trip.nim",
@@ -149,6 +146,17 @@ const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
     binary: "build/test-bin/test_termctl_panic_safe_restore"),
   TermctlTestSpec(source: "tests/test_termctl_sigwinch_resize.nim",
     binary: "build/test-bin/test_termctl_sigwinch_resize"),
+]
+
+const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
+  # These ``import std/posix`` (and ``std/termios``) unconditionally and
+  # drive POSIX-only machinery (signals, termios, ``openpty``) — they build
+  # + run on Linux/macOS but not Windows. Gated ``when not defined(windows)``
+  # at extraction below. The Justfile's ``posix-only-tests`` is the same set.
+  TermctlTestSpec(source: "tests/test_termctl_key_reporting_restore.nim",
+    binary: "build/test-bin/test_termctl_key_reporting_restore"),
+  TermctlTestSpec(source: "tests/test_termctl_extra_restore.nim",
+    binary: "build/test-bin/test_termctl_extra_restore"),
   TermctlTestSpec(source: "tests/test_termctl_no_leaks.nim",
     binary: "build/test-bin/test_termctl_no_leaks"),
 ]
@@ -163,11 +171,21 @@ package nim_termctl:
   uses:
     # Toolchain floor — the PATH-resolvable binaries the build needs.
     # ``nim`` compiles every test binary (the ``buildNimUnittest.build``
-    # edges below); the nimble file requires ``nim >= 2.0.0``. ``gcc`` is
-    # the C back-end ``nim c`` shells out to. Sufficient for the path-mode
-    # resolver under ``nix develop``.
+    # edges below); the nimble file requires ``nim >= 2.0.0``. Nim uses
+    # clang on macOS and gcc on the other declared platforms; bind the
+    # actual backend identity to every compile action below.
     "nim >=2.0"
-    "gcc >=12"
+    when defined(macosx):
+      "clang >=14"
+    else:
+      "gcc >=12"
+    # The `just` cross-checks run inside this environment on every leg. On
+    # Linux and macOS the flake dev shell already supplies both tools; on
+    # Windows nothing else does, so they are declared here (as
+    # nim-stackable-hooks does). `sh` supplies the bash the Justfile's
+    # `set shell` names.
+    "just >=1"
+    "sh"
 
   # Library declaration — the ``src/`` tree the ``Justfile`` puts on
   # ``--path:src`` is importable when this package is consumed via
@@ -181,7 +199,7 @@ package nim_termctl:
     # halves collect into ``test-builds``; EXECUTE halves collect into
     # ``test`` (each execute edge transitively depends on its build edge).
     #
-    # This repo has NO ``config.nims``; the ``Justfile`` compiles every
+    # The ``Justfile`` compiles every
     # test with ``--path:src --path:tests``. The tests ``import
     # nim_termctl`` (src/) and the POSIX tests ``import test_helpers``
     # (tests/), so ``paths = @["src", "tests"]`` reproduces that search
@@ -206,6 +224,10 @@ package nim_termctl:
         defines = @["release"],
         paths = @["src", "tests"],
         actionId = "nim_termctl.test_build." & stem)
+      when defined(macosx):
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["clang"])
+      else:
+        appendRegisteredActionToolIdentityRefs(edge.action.id, ["gcc"])
       buildActions.add(edge.action)
       # ``registerImplicitName = false``: the BUILD edge already owns the
       # binary basename as its implicit target name; the explicit

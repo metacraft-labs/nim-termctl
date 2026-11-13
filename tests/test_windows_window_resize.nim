@@ -19,48 +19,86 @@ when not defined(windows):
     test "skipped":
       skip()
 else:
+  # The cases inject records into the console input buffer, so they run
+  # in an isolated child that owns a private console
+  # (=windows_console_fixture=): the runner may have no console at all, or
+  # a shared one whose input buffer other processes read.
   import nim_termctl
+  import std/strutils
+  import windows_console_fixture
 
-  suite "L3: Windows window-resize":
+  const childCompleted = "TERMCTL_PRIVATE_CONSOLE_WINDOW_RESIZE_CASES_COMPLETED"
 
-    test "WINDOW_BUFFER_SIZE_EVENT round-trip via WriteConsoleInputW":
-      installWinchHandler()
-      defer: uninstallWinchHandler()
+  proc runWindowResizeCases() =
+    let console = openOwnedTestConsole()
+    discard modes(console)
+    countPrivateConsoleCases()
 
-      # Drain anything that may already be queued (the runner may have
-      # produced a stray event during startup).
-      discard pollWindowBufferSize()
+    suite "L3: Windows window-resize":
 
-      # Inject a known size into the input buffer.
-      check injectWindowBufferSizeEvent(120, 40)
+      test "WINDOW_BUFFER_SIZE_EVENT round-trip via WriteConsoleInputW":
+        installWinchHandler()
+        defer:
+          uninstallWinchHandler()
+          # installWinchHandler also installs the Ctrl wakeup; the two have
+          # separate lifecycles, so release the control owner here too.
+          uninstallCtrlCHandler()
 
-      let r = pollWindowBufferSize()
-      check r.hadResize
-      check r.cols == 120
-      check r.rows == 40
+        # Drain anything that may already be queued (the runner may have
+        # produced a stray event during startup).
+        discard pollWindowBufferSize()
 
-    test "drain coalesces multiple resize records into the latest size":
-      installWinchHandler()
-      defer: uninstallWinchHandler()
+        # Inject a known size into the input buffer.
+        check injectWindowBufferSizeEvent(120, 40)
 
-      discard pollWindowBufferSize()
+        let r = pollWindowBufferSize()
+        check r.hadResize
+        check r.cols == 120
+        check r.rows == 40
 
-      check injectWindowBufferSizeEvent(80, 24)
-      check injectWindowBufferSizeEvent(132, 50)
-      check injectWindowBufferSizeEvent(200, 60)
+      test "drain coalesces multiple resize records into the latest size":
+        installWinchHandler()
+        defer:
+          uninstallWinchHandler()
+          # installWinchHandler also installs the Ctrl wakeup; the two have
+          # separate lifecycles, so release the control owner here too.
+          uninstallCtrlCHandler()
 
-      let r = pollWindowBufferSize()
-      check r.hadResize
-      # We accept the *latest* of the injected sizes - that's the
-      # documented coalescing behaviour. Production code that wants to
-      # see every record should drain more often.
-      check r.cols == 200
-      check r.rows == 60
+        discard pollWindowBufferSize()
 
-    test "no-op poll returns hadResize=false":
-      installWinchHandler()
-      defer: uninstallWinchHandler()
-      # Drain anything pending first.
-      discard pollWindowBufferSize()
-      let r = pollWindowBufferSize()
-      check not r.hadResize
+        check injectWindowBufferSizeEvent(80, 24)
+        check injectWindowBufferSizeEvent(132, 50)
+        check injectWindowBufferSizeEvent(200, 60)
+
+        let r = pollWindowBufferSize()
+        check r.hadResize
+        # We accept the *latest* of the injected sizes - that's the
+        # documented coalescing behaviour. Production code that wants to
+        # see every record should drain more often.
+        check r.cols == 200
+        check r.rows == 60
+
+      test "no-op poll returns hadResize=false":
+        installWinchHandler()
+        defer:
+          uninstallWinchHandler()
+          # installWinchHandler also installs the Ctrl wakeup; the two have
+          # separate lifecycles, so release the control owner here too.
+          uninstallCtrlCHandler()
+        # Drain anything pending first.
+        discard pollWindowBufferSize()
+        let r = pollWindowBufferSize()
+        check not r.hadResize
+
+    reportPrivateConsoleCompletion(childCompleted, 3)
+
+  if isPrivateConsoleChild():
+    runWindowResizeCases()
+  else:
+    suite "L3: isolated Windows window-resize fixture":
+      test "all window-resize cases pass in a private console":
+        let run = runPrivateConsoleChild()
+        checkpoint run.output
+        check not run.timedOut
+        check run.exitCode == 0
+        check childCompleted in run.output

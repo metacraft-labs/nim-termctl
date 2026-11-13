@@ -52,8 +52,34 @@ proc cWrite(fd: cint; buf: pointer; count: csize_t): clong
 proc cRead(fd: cint; buf: pointer; count: csize_t): clong
   {.importc: "read", header: "<unistd.h>".}
 
-proc cPipe2(p: ptr cint; flags: cint): cint
-  {.importc: "pipe2", header: "<unistd.h>".}
+when defined(linux):
+  proc cPipe2(p: ptr cint; flags: cint): cint
+    {.importc: "pipe2", header: "<unistd.h>".}
+
+proc openSelfPipe(fds: var array[2, cint]): OSErrorCode =
+  ## A pipe whose two ends are non-blocking and close-on-exec. Linux has
+  ## `pipe2(2)`, which sets both atomically. macOS has no `pipe2`
+  ## (https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/pipe.2.html),
+  ## so there the flags are set with `fcntl(2)` right after `pipe(2)`.
+  ## The window in between only matters to a concurrent `fork`+`exec`,
+  ## which could inherit the two descriptors; they carry no secret.
+  ## Returns `OSErrorCode(0)` on success, else the failing call's errno
+  ## (captured before any cleanup can overwrite it).
+  when defined(linux):
+    if cPipe2(addr fds[0], O_NONBLOCK or O_CLOEXEC) != 0:
+      return osLastError()
+  else:
+    if pipe(fds) != 0:
+      return osLastError()
+    for fd in fds:
+      let fl = fcntl(fd, F_GETFL)
+      if fl < 0 or fcntl(fd, F_SETFL, fl or O_NONBLOCK) < 0 or
+          fcntl(fd, F_SETFD, FD_CLOEXEC) < 0:
+        result = osLastError()
+        discard posix.close(fds[0])
+        discard posix.close(fds[1])
+        return
+  result = OSErrorCode(0)
 
 proc cClose(fd: cint): cint
   {.importc: "close", header: "<unistd.h>".}
@@ -105,8 +131,37 @@ var
   gMouseActive {.threadvar.}: bool
   gPasteActive {.threadvar.}: bool
   gFocusActive {.threadvar.}: bool
+  gKeyReportingActive {.threadvar.}: int
+    ## Which extended key reporting `enableKeyReporting` turned on: 0 none,
+    ## 1 Kitty, 2 `modifyOtherKeys`. An int and not a string so the signal
+    ## handler reads a word and writes a constant, allocating and freeing
+    ## nothing.
   gAtexitInstalled {.threadvar.}: bool
   gSigHandlersInstalled {.threadvar.}: bool
+
+const
+  ExtraRestoreCapacity* = 512
+    ## Bytes an application may add to the restore (`setExtraRestore`).
+
+var
+  gRawTermios {.threadvar.}: Termios
+    ## The raw attributes `enableRawMode` set — put back after a stop
+    ## (SIGTSTP) is continued.
+  gResumed {.threadvar.}: bool
+    ## A stop was continued since `takeResumed` last answered.
+  gExtraResume: array[ExtraRestoreCapacity, char]
+  gExtraResumeLen: int
+    ## The bytes that put the APPLICATION'S modes back after a stop is
+    ## continued (`setExtraResume`) — the counterpart of `gExtraRestore`.
+  gExtraRestore: array[ExtraRestoreCapacity, char]
+  gExtraRestoreLen: int
+    ## The APPLICATION'S modes, reset by the same async-signal-safe restore
+    ## as the ones this library sets: synchronized output (2026), grapheme
+    ## clustering (2027), pixel and any-motion mouse (1016, 1003), a pointer
+    ## shape pushed with OSC 22 — whatever the application turned on that is
+    ## not raw mode, the alternate screen, mouse capture, paste, focus or
+    ## extended keys. A FIXED array, written by `write(2)` from the signal
+    ## handler: nothing is allocated on the restore path.
 
 const
   altScreenLeaveSeq = "\x1b[?1049l"
@@ -114,6 +169,8 @@ const
   pasteLeaveSeq = "\x1b[?2004l"
   focusLeaveSeq = "\x1b[?1004l"
   showCursorSeqLocal = "\x1b[?25h"
+  kittyPopSeqLocal = "\x1b[<u"
+  modifyOtherKeysOffSeqLocal = "\x1b[>4;0m"
 
 proc writeAllSafe(fd: cint; s: string) =
   ## Async-signal-safe `write(2)` - no Nim allocation. Used by the signal
@@ -133,9 +190,22 @@ proc restoreTerminalSafe() {.cdecl.} =
   if not gNeedsRestore:
     return
   gNeedsRestore = false
-  # Order matters: leave alt-screen and mouse mode FIRST so the visible
-  # output (cursor visibility, normal scroll buffer) is what users see
-  # post-restore. Then drop termios back to cooked.
+  # Order matters: undo extended key reporting FIRST — the Kitty protocol
+  # keeps one flag stack per screen, so its pop must reach the alternate
+  # screen it was pushed on, before that screen is left. A terminal left in
+  # disambiguate mode sends `CSI 99 ; 5 u` for Ctrl+c to the user's shell.
+  # Then leave alt-screen and mouse mode so the visible output (cursor
+  # visibility, normal scroll buffer) is what users see post-restore. Then
+  # drop termios back to cooked.
+  if gKeyReportingActive == 1:
+    writeAllSafe(STDOUT_FILENO, kittyPopSeqLocal)
+  elif gKeyReportingActive == 2:
+    writeAllSafe(STDOUT_FILENO, modifyOtherKeysOffSeqLocal)
+  gKeyReportingActive = 0
+  # The application's own modes, on the screen they were set on.
+  if gExtraRestoreLen > 0:
+    discard cWrite(STDOUT_FILENO, cast[pointer](addr gExtraRestore[0]),
+                   csize_t(gExtraRestoreLen))
   if gAltScreenActive:
     writeAllSafe(STDOUT_FILENO, altScreenLeaveSeq)
     gAltScreenActive = false
@@ -151,6 +221,66 @@ proc restoreTerminalSafe() {.cdecl.} =
   writeAllSafe(STDOUT_FILENO, showCursorSeqLocal)
   if gActiveTty >= 0:
     discard tcSetAttr(gActiveTty, TCSAFLUSH, addr gSavedTermios)
+
+proc setExtraRestore*(sequence: string): bool =
+  ## Register the bytes that undo the application's own terminal modes (see
+  ## `gExtraRestore`), REPLACING any earlier registration. They are written by
+  ## the restore on EVERY exit path — `atexit`, SIGINT / SIGTERM / SIGHUP /
+  ## SIGQUIT, a crash — after extended keys are undone and before the
+  ## alternate screen is left; `writeExtraRestore` writes the same bytes on
+  ## a normal exit, so one buffer serves every path. False (and nothing
+  ## changed) when `sequence` is longer than `ExtraRestoreCapacity`.
+  if sequence.len > ExtraRestoreCapacity:
+    return false
+  # The length is cleared first and set last, so a signal arriving while the
+  # bytes are copied writes either nothing or the whole new sequence.
+  gExtraRestoreLen = 0
+  for i, c in sequence:
+    gExtraRestore[i] = c
+  gExtraRestoreLen = sequence.len
+  true
+
+proc extraRestore*(): string =
+  ## The registered bytes (for a test, and for the report).
+  result = newString(gExtraRestoreLen)
+  for i in 0 ..< gExtraRestoreLen:
+    result[i] = gExtraRestore[i]
+
+proc setExtraResume*(sequence: string): bool =
+  ## Register the bytes that put the application's own terminal modes back
+  ## when the process continues after a stop (SIGTSTP, then SIGCONT): the
+  ## stop wrote the restore (`setExtraRestore`) and gave the terminal back;
+  ## the continue takes it again — raw mode, the alternate screen, mouse,
+  ## paste, focus and extended keys as they were — and then writes these.
+  ## REPLACES any earlier registration; false (and nothing changed) when
+  ## `sequence` is longer than `ExtraRestoreCapacity`.
+  if sequence.len > ExtraRestoreCapacity:
+    return false
+  gExtraResumeLen = 0
+  for i, c in sequence:
+    gExtraResume[i] = c
+  gExtraResumeLen = sequence.len
+  true
+
+proc extraResume*(): string =
+  ## The registered resume bytes (for a test).
+  result = newString(gExtraResumeLen)
+  for i in 0 ..< gExtraResumeLen:
+    result[i] = gExtraResume[i]
+
+proc takeResumed*(): bool =
+  ## Whether a stop (SIGTSTP) was continued since the last call: the
+  ## terminal was given back and taken again, so what it shows is not what
+  ## the application last drew — it must paint a whole frame.
+  result = gResumed
+  gResumed = false
+
+proc writeExtraRestore*(fd: cint = STDOUT_FILENO) =
+  ## The registered bytes, written now — the normal exit's half of the one
+  ## buffer. Leaves the registration in place.
+  if gExtraRestoreLen > 0:
+    discard cWrite(fd, cast[pointer](addr gExtraRestore[0]),
+                   csize_t(gExtraRestoreLen))
 
 type
   CtrlCallback* = proc () {.gcsafe.}
@@ -186,6 +316,49 @@ proc onSignal(sig: cint) {.noconv.} =
   discard sigaction(sig, sa, nil)
   discard kill(getpid(), sig)
 
+let FatalSignals = [SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT]
+  ## A CRASH. The process is dying either way; what is ours to do is give the
+  ## terminal back first — a terminal left in the alternate screen, in raw
+  ## mode, or with the Kitty keyboard protocol on (`Ctrl+c` arriving at the
+  ## user's shell as `CSI 99 ; 5 u`) is the crash's damage outliving it.
+  ##
+  ## `let`, NOT `const`, and that is forced by the platform rather than a
+  ## preference. Nim's `posix` module defines these as compile-time values on
+  ## Linux (`posix_linux_amd64_consts.nim`: `const SIGSEGV* = cint(11)`) but
+  ## as C globals read from the header everywhere else
+  ## (`posix_other_consts.nim`: `var SIGSEGV* {.importc: "SIGSEGV",
+  ## header: "<signal.h>".}: cint`), which is what macOS uses. A `const`
+  ## array of them therefore compiles on Linux and CANNOT compile on macOS:
+  ## `Error: cannot evaluate at compile time: SIGSEGV`. Nothing here needs
+  ## them at compile time — both uses below are ordinary runtime loops.
+
+var gPreviousFatal: array[FatalSignals.len, Sigaction]
+  ## Whatever handled each fatal signal before us (the language runtime's
+  ## stack-trace printer, or the default). Not thread-local: a crash is
+  ## delivered to whichever thread faulted.
+
+proc onFatalSignal(sig: cint) {.noconv.} =
+  ## Restore the terminal, then hand the signal back to the handler that was
+  ## there before: reinstate it and raise the signal again. The signal is
+  ## blocked while this handler runs, so the re-raise is delivered — to the
+  ## previous action — the moment this returns, whether the crash was a real
+  ## fault or a `kill`.
+  restoreTerminalSafe()
+  for i, fatal in FatalSignals:
+    if fatal == sig:
+      discard sigaction(sig, gPreviousFatal[i], nil)
+  discard kill(getpid(), sig)
+
+proc onSuspend(sig: cint) {.noconv.}
+  ## SIGTSTP — defined beside the SIGWINCH self-pipe it nudges.
+
+proc installSuspendHandler() =
+  var stop = Sigaction()
+  stop.sa_handler = onSuspend
+  discard sigemptyset(stop.sa_mask)
+  stop.sa_flags = 0
+  discard sigaction(SIGTSTP, stop, nil)
+
 proc installSignalHandlers() =
   if gSigHandlersInstalled: return
   gSigHandlersInstalled = true
@@ -197,6 +370,15 @@ proc installSignalHandlers() =
   discard sigaction(SIGTERM, sa, nil)
   discard sigaction(SIGHUP, sa, nil)
   discard sigaction(SIGQUIT, sa, nil)
+  # A STOP (`kill -TSTP`, a job-control suspend): the terminal is given back
+  # before the process stops, and taken again when it is continued.
+  installSuspendHandler()
+  var fatal = Sigaction()
+  fatal.sa_handler = onFatalSignal
+  discard sigemptyset(fatal.sa_mask)
+  fatal.sa_flags = 0
+  for i, sig in FatalSignals:
+    discard sigaction(sig, fatal, addr gPreviousFatal[i])
 
 proc installCtrlCHandler*(callback: CtrlCallback) =
   ## POSIX-side parity surface for the Windows =installCtrlCHandler=. On
@@ -224,6 +406,7 @@ proc uninstallCtrlCHandler*() =
   discard sigaction(SIGTERM, sa, nil)
   discard sigaction(SIGHUP, sa, nil)
   discard sigaction(SIGQUIT, sa, nil)
+  discard sigaction(SIGTSTP, sa, nil)
 
 proc ctrlEventReceived*(): bool {.inline.} =
   ## True if a Ctrl-C / SIGINT / SIGTERM handler has fired since the last
@@ -307,6 +490,7 @@ proc enableRawMode*(fd: cint = STDIN_FILENO): RawMode =
     raiseOSError("tcsetattr (raw)")
   gActiveTty = fd
   gSavedTermios = saved
+  gRawTermios = raw
   gNeedsRestore = true
   installSignalHandlers()
   installAtexit()
@@ -376,6 +560,68 @@ proc leaveAltScreen*(a: var AltScreen) =
   writeStringRaw(a.fd, "\x1b[?1049l")
   a.active = false
   gAltScreenActive = false
+
+# ---------------------------------------------------------------------------
+# Extended key reporting (the Kitty keyboard protocol, xterm modifyOtherKeys)
+# ---------------------------------------------------------------------------
+
+type
+  KeyReportingMode* = enum
+    ## How the terminal is asked to report keys.
+    krmKitty        ## Kitty progressive enhancement, flag 1 (disambiguate)
+    krmModifyOtherKeys ## xterm `modifyOtherKeys` level 2
+
+  KeyReporting* = object
+    ## RAII handle for extended key reporting. While alive the terminal
+    ## reports modified keys unambiguously; on destruction, on
+    ## `disableKeyReporting`, and from the signal / atexit restore, the mode is
+    ## undone — the Kitty flags popped, `modifyOtherKeys` reset.
+    fd*: cint
+    mode*: KeyReportingMode
+    active*: bool
+
+const
+  KittyPushDisambiguateSeq* = "\x1b[>1u"
+  KittyPopSeq* = "\x1b[<u"
+  ModifyOtherKeysOnSeq* = "\x1b[>4;2m"
+  ModifyOtherKeysOffSeq* = "\x1b[>4;0m"
+
+func keyReportingLeaveSeq*(mode: KeyReportingMode): string =
+  ## The bytes that undo `mode`.
+  case mode
+  of krmKitty: KittyPopSeq
+  of krmModifyOtherKeys: ModifyOtherKeysOffSeq
+
+proc `=copy`*(dest: var KeyReporting; src: KeyReporting) {.error.}
+
+template keyReportingDestroyBody(k: untyped) =
+  if k.active:
+    let leave = keyReportingLeaveSeq(k.mode)
+    discard cWrite(k.fd, cast[pointer](cstring(leave)), csize_t(leave.len))
+    gKeyReportingActive = 0
+
+when defined(gcDestructors):
+  proc `=destroy`*(k: KeyReporting) = keyReportingDestroyBody(k)
+else:
+  proc `=destroy`*(k: var KeyReporting) = keyReportingDestroyBody(k)
+
+proc enableKeyReporting*(mode: KeyReportingMode;
+                        fd: cint = STDOUT_FILENO): KeyReporting =
+  ## Ask the terminal for extended key reporting. Call AFTER `enterAltScreen`:
+  ## the Kitty flag stack is per screen. The undo sequence is registered with
+  ## the async-signal-safe restore before this returns, so a SIGTERM, a SIGHUP
+  ## or a crash from here on leaves the terminal in its legacy encoding.
+  gKeyReportingActive = (if mode == krmKitty: 1 else: 2)
+  case mode
+  of krmKitty: writeStringRaw(fd, KittyPushDisambiguateSeq)
+  of krmModifyOtherKeys: writeStringRaw(fd, ModifyOtherKeysOnSeq)
+  result = KeyReporting(fd: fd, mode: mode, active: true)
+
+proc disableKeyReporting*(k: var KeyReporting) =
+  if not k.active: return
+  writeStringRaw(k.fd, keyReportingLeaveSeq(k.mode))
+  k.active = false
+  gKeyReportingActive = 0
 
 # ---------------------------------------------------------------------------
 # Mouse capture / bracketed paste / focus reporting
@@ -510,8 +756,9 @@ proc installWinchHandler*() =
     return
   gWinchHandlerInstalled = true
   var fds: array[2, cint]
-  if cPipe2(addr fds[0], O_NONBLOCK or O_CLOEXEC) != 0:
-    raiseOSError("pipe2 (winch)")
+  let pipeError = openSelfPipe(fds)
+  if pipeError != OSErrorCode(0):
+    raiseOSError(pipeError, "self-pipe (winch)")
   gWinchPipeR = fds[0]
   gWinchPipeW = fds[1]
   var sa = Sigaction()
@@ -534,6 +781,68 @@ proc uninstallWinchHandler*() =
   if gWinchPipeW >= 0:
     discard cClose(gWinchPipeW); gWinchPipeW = -1
   gWinchHandlerInstalled = false
+
+# ---------------------------------------------------------------------------
+# SIGTSTP: give the terminal back before stopping, take it again on SIGCONT
+# ---------------------------------------------------------------------------
+
+proc onSuspend(sig: cint) {.noconv.} =
+  ## A STOP. Async-signal-safe throughout (`write(2)`, `tcsetattr`,
+  ## `sigaction`, `sigprocmask`, `kill`). The restore every exit path writes
+  ## runs first, so the shell the user returns to has its screen, its
+  ## cursor and cooked input; then the process stops — the default action,
+  ## raised with SIGTSTP unblocked so it takes effect HERE, inside the
+  ## handler. When it is continued, `kill` returns: raw mode, the alternate
+  ## screen, mouse, paste, focus and extended keys are put back as they were,
+  ## then the application's own bytes (`setExtraResume`), and the SIGWINCH
+  ## self-pipe is nudged so a loop blocked in `select` wakes and paints a
+  ## whole frame (`takeResumed`).
+  let held = gNeedsRestore
+  let alt = gAltScreenActive
+  let mouse = gMouseActive
+  let paste = gPasteActive
+  let focus = gFocusActive
+  let keys = gKeyReportingActive
+  restoreTerminalSafe()
+  var dfl = Sigaction()
+  dfl.sa_handler = SIG_DFL
+  discard sigemptyset(dfl.sa_mask)
+  dfl.sa_flags = 0
+  discard sigaction(SIGTSTP, dfl, nil)
+  var unblock, before: Sigset
+  discard sigemptyset(unblock)
+  discard sigaddset(unblock, SIGTSTP)
+  discard sigprocmask(SIG_UNBLOCK, unblock, before)
+  discard kill(getpid(), SIGTSTP)
+  # Continued.
+  installSuspendHandler()
+  if held and gActiveTty >= 0:
+    discard tcSetAttr(gActiveTty, TCSAFLUSH, addr gRawTermios)
+    gNeedsRestore = true
+    if alt:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?1049h")
+      gAltScreenActive = true
+    if mouse:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?1000h\x1b[?1006h")
+      gMouseActive = true
+    if paste:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?2004h")
+      gPasteActive = true
+    if focus:
+      writeAllSafe(STDOUT_FILENO, "\x1b[?1004h")
+      gFocusActive = true
+    if keys == 1:
+      writeAllSafe(STDOUT_FILENO, KittyPushDisambiguateSeq)
+    elif keys == 2:
+      writeAllSafe(STDOUT_FILENO, ModifyOtherKeysOnSeq)
+    gKeyReportingActive = keys
+    if gExtraResumeLen > 0:
+      discard cWrite(STDOUT_FILENO, cast[pointer](addr gExtraResume[0]),
+                     csize_t(gExtraResumeLen))
+    gResumed = true
+    if gWinchHandlerInstalled and gWinchPipeW >= 0:
+      var b: byte = 1
+      discard cWrite(gWinchPipeW, addr b, csize_t(1))
 
 # ---------------------------------------------------------------------------
 # Test-only hooks

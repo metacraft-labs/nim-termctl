@@ -39,7 +39,12 @@ nimcache := ".nimcache"
 # that the Linux matrix catches Windows-side regressions to test
 # scaffolding; on the `windows-latest` lane (=test-windows= recipe) the
 # guards drop and the real-stack assertions execute.
-tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim tests/test_nimcache_is_worktree_local.nim"
+# Three files drive POSIX-only machinery (signals, termios, openpty) and
+# import std/posix, so they cannot compile for Windows; every other file
+# adapts itself with `when defined(windows)` and runs on all platforms.
+posix-only-tests := "tests/test_termctl_key_reporting_restore.nim tests/test_termctl_extra_restore.nim tests/test_termctl_no_leaks.nim"
+windows-runnable-tests := "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim tests/test_nimcache_is_worktree_local.nim"
+tests := if os() == "windows" { windows-runnable-tests } else { "tests/test_termctl_raw_mode_round_trip.nim tests/test_termctl_alt_screen_round_trip.nim tests/test_termctl_signal_safe_restore.nim tests/test_termctl_panic_safe_restore.nim tests/test_termctl_key_reporting_restore.nim tests/test_termctl_extra_restore.nim tests/test_termctl_event_decode_corpus.nim tests/test_termctl_sigwinch_resize.nim tests/test_termctl_no_leaks.nim tests/test_api_invariants.nim tests/test_windows_signals_compile.nim tests/test_windows_ctrl_c_handler.nim tests/test_windows_window_resize.nim tests/test_nimcache_is_worktree_local.nim" }
 
 # Windows-only tests are now part of the main `tests` list (guarded with
 # `when defined(windows)`). The `windows-tests` variable is kept for
@@ -292,3 +297,16 @@ test-windows:
         --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_r \
         -r $t 2>&1 | tee -a test-logs/windows.log; \
     done
+    @echo "[windows-control-ownership] original event controls and automatic owner lifetime"
+    nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        --nimcache:{{nimcache}}/tests/windows_ctrl_event_control_r \
+        -o:test-logs/windows_ctrl_event_control.exe tests/windows_ctrl_event_control.nim
+    nim c {{nim-flags}} {{src-paths}} --mm:orc -d:release --threads:on \
+        --nimcache:{{nimcache}}/tests/ctrl_owner_lifetime_controls_r \
+        -o:test-logs/ctrl_owner_lifetime_controls.exe tests/ctrl_owner_lifetime_controls.nim
+    pwsh -NoProfile -ExecutionPolicy Bypass -File ci/run-windows-control-probes.ps1 -OwnerImage test-logs/ctrl_owner_lifetime_controls.exe -EventImage test-logs/windows_ctrl_event_control.exe -MemoryManager orc -OutputDirectory test-logs
+
+# Entering the dev shell from another git repository must write nothing there.
+# Runs `nix develop`, so it is not part of the in-shell test recipes.
+test-dev-shell:
+    bash tests/test_dev_shell_writes_nothing_elsewhere.sh
