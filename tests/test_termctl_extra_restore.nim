@@ -8,7 +8,7 @@
 ## No mocks: a real pty (`openpty`), a real child process that enables raw
 ## mode and registers the bytes, and the bytes read off the pty master.
 
-import std/[os, posix, strutils, termios, unittest, volatile]
+import std/[os, posix, strutils, termios, times, unittest, volatile]
 
 import nim_termctl
 
@@ -74,11 +74,21 @@ proc waitReading(pid: Pid; master: cint; status: var cint;
   ## the master reads it, so a parent that only reads after waitpid
   ## returns deadlocks with its child (m4, at ff73591: the child blocked in
   ## tcsetattr inside the SIGTERM handler, the parent in wait4).
+  ## Bounded: a child that never reaches the awaited state fails the case
+  ## with what it wrote, instead of holding the runner until its job
+  ## timeout (the Valgrind job did, for six hours, at 1bb688c).
+  let deadline = epochTime() + 30.0
   while true:
     result.add readAll(master, 50)
     let r = waitpid(pid, status, options or WNOHANG)
     if r == pid: break
     doAssert r == 0, "waitpid failed"
+    if epochTime() > deadline:
+      discard posix.kill(pid, SIGKILL)
+      discard waitpid(pid, status, 0)
+      raise newException(AssertionDefect,
+        "child did not reach the awaited state within 30 s; it wrote: " &
+        result.escape)
 
 proc spawnChild(mode: string): tuple[pid: Pid; master: cint; seen: string] =
   var master, slave: cint
