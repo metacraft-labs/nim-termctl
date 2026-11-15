@@ -18,6 +18,18 @@
 ## signal a sibling process uses.
 ##
 ## Gated with =when defined(windows)=. CI runs this on the Windows lane.
+##
+## The cases run in an isolated child that owns a PRIVATE console
+## (=windows_console_fixture=). Process group 0 means every process attached
+## to the caller's console, so raising CTRL_BREAK_EVENT from the runner's
+## own console also reached the build tool and the shell that started the
+## test: under =repro test= PowerShell answered it by entering its debugger
+## and the job failed. In the private console the child is the only
+## process the event reaches. The child also keeps a test-owned guard
+## handler registered beneath the product's, so the break raised after
+## =uninstallCtrlCHandler= is absorbed instead of terminating the child --
+## the old comment assumed "the test runner has its own handler installed",
+## which nothing guarantees.
 
 import std/unittest
 
@@ -31,48 +43,76 @@ when not defined(windows):
       skip()
 else:
   import nim_termctl
-  import std/os
+  import std/[os, strutils]
+  import windows_console_fixture
 
-  suite "L3: Windows Ctrl-C handler":
+  const childCompleted = "TERMCTL_PRIVATE_CONSOLE_CTRL_HANDLER_CASES_COMPLETED"
 
-    test "SetConsoleCtrlHandler dispatches to user callback":
-      var fired = 0
-      proc cb() {.gcsafe.} = inc fired
-      installCtrlCHandler(cb)
-      defer: uninstallCtrlCHandler()
+  proc setGuardHandler(handler: proc (ctrlType: culong): int32 {.stdcall.};
+                       add: int32): int32
+    {.importc: "SetConsoleCtrlHandler", header: "<windows.h>", stdcall.}
 
-      resetCtrlEventReceived()
-      check not ctrlEventReceived()
+  proc absorbCtrlEvent(ctrlType: culong): int32 {.stdcall.} =
+    ## Test-owned guard: claims every event that reaches it, so an event
+    ## raised while no product handler is installed cannot end the child.
+    1
 
-      # Fire CTRL_BREAK_EVENT at our own process group (pid 0 means
-      # "every process attached to the current console"). The handler
-      # runs on a Win32-spawned thread; we wait up to 5 s for it.
-      let ok = generateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)
-      check ok != 0
+  proc runCtrlHandlerCases() =
+    let console = openOwnedTestConsole()
+    discard modes(console)
+    countPrivateConsoleCases()
+    if setGuardHandler(absorbCtrlEvent, 1) == 0:
+      raise newException(OSError, "SetConsoleCtrlHandler(guard) failed")
+    defer: discard setGuardHandler(absorbCtrlEvent, 0)
 
-      # WaitForSingleObject on the manual-reset event the handler signals.
-      check waitForCtrlEvent(5_000)
+    suite "L3: Windows Ctrl-C handler":
 
-      # Belt-and-braces: small sleep to let the handler thread finish
-      # invoking the Nim callback before we read =fired=. The thread
-      # signals BEFORE running the user callback, so without a barrier
-      # there's a tiny race window. 50 ms is generous on every CI we
-      # ship to.
-      sleep(50)
-      check fired >= 1
-      check ctrlEventReceived()
+      test "SetConsoleCtrlHandler dispatches to user callback":
+        var fired = 0
+        proc cb() {.gcsafe.} = inc fired
+        installCtrlCHandler(cb)
+        defer: uninstallCtrlCHandler()
 
-    test "uninstallCtrlCHandler stops further dispatch":
-      var fired = 0
-      proc cb() {.gcsafe.} = inc fired
-      installCtrlCHandler(cb)
-      uninstallCtrlCHandler()
+        resetCtrlEventReceived()
+        check not ctrlEventReceived()
 
-      let ok = generateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)
-      check ok != 0
-      sleep(50)
-      # After uninstall the callback must not run again. (The default
-      # CTRL_BREAK_EVENT action would normally terminate the process,
-      # but the test runner has its own handler installed, so we simply
-      # observe the flag stayed 0.)
-      check fired == 0
+        # Fire CTRL_BREAK_EVENT at process group 0: every process attached
+        # to this child's private console, i.e. only the child. The handler
+        # runs on a Win32-spawned thread; we wait up to 5 s for it.
+        let ok = generateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)
+        check ok != 0
+
+        # WaitForSingleObject on the manual-reset event the handler signals.
+        check waitForCtrlEvent(5_000)
+
+        # The handler thread signals BEFORE running the user callback, so
+        # give it a moment before reading =fired=.
+        sleep(50)
+        check fired >= 1
+        check ctrlEventReceived()
+
+      test "uninstallCtrlCHandler stops further dispatch":
+        var fired = 0
+        proc cb() {.gcsafe.} = inc fired
+        installCtrlCHandler(cb)
+        uninstallCtrlCHandler()
+
+        let ok = generateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)
+        check ok != 0
+        sleep(50)
+        # After uninstall the callback must not run again; the guard
+        # handler absorbs the event.
+        check fired == 0
+
+    reportPrivateConsoleCompletion(childCompleted, 2)
+
+  if isPrivateConsoleChild():
+    runCtrlHandlerCases()
+  else:
+    suite "L3: isolated Windows Ctrl-C handler fixture":
+      test "both control-handler cases pass in a private console":
+        let run = runPrivateConsoleChild()
+        checkpoint run.output
+        check not run.timedOut
+        check run.exitCode == 0
+        check childCompleted in run.output
