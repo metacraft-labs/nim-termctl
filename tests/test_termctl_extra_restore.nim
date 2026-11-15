@@ -130,6 +130,14 @@ proc afterReady(s: string): string =
   let at = s.find("READY")
   if at < 0: "" else: s[at + "READY".len .. ^1]
 
+proc runningUnderValgrind(): bool =
+  ## Valgrind runs its guest with its core preload library on LD_PRELOAD
+  ## (vgpreload_core-<platform>.so) and that variable is inherited by a
+  ## forked child, so this answers for the child as well. It is the same
+  ## fact valgrind.h's RUNNING_ON_VALGRIND reports, without making this test
+  ## depend on the Valgrind headers on every platform it compiles for.
+  "vgpreload_core" in getEnv("LD_PRELOAD")
+
 suite "setExtraRestore":
   test "too long a sequence is refused and changes nothing":
     check setExtraRestore("abc")
@@ -154,29 +162,43 @@ suite "setExtraRestore":
     check out4.afterReady.contains(Sequence)
 
   test "SIGTSTP writes them before the stop; SIGCONT takes the terminal again":
-    var (pid, master, seen) = spawnChild("stop")
-    discard posix.kill(pid, SIGTSTP)
-    var status: cint
-    # The child STOPS (WUNTRACED reports it) — after writing the restore.
-    var stopped = waitReading(pid, master, status, WUNTRACED)
-    check WIFSTOPPED(status)
-    stopped.add readAll(master, 300)
-    check stopped.contains(Sequence)
-    check not stopped.contains(Resume)
-    # Continued: raw mode back, the application's modes back, and the
-    # application told (`takeResumed`).
-    discard posix.kill(pid, SIGCONT)
-    var back = ""
-    for i in 0 ..< 40:
-      back.add readAll(master, 100)
-      if back.contains("RESUMED"): break
-    checkpoint("after SIGCONT: " & back.escape)
-    check back.contains(Resume)
-    check back.contains("RESUMED RAW")
-    # And it still restores on the way out.
-    discard posix.kill(pid, SIGTERM)
-    var last = waitReading(pid, master, status)
-    last.add readAll(master, 300)
-    check last.contains(Sequence)
-    discard close(master)
-    discard seen
+    if runningUnderValgrind():
+      # EXEMPT UNDER VALGRIND ONLY, by operator decision (Zahary Karadjov,
+      # 2026-11-14). Valgrind 3.26 does not stop a process that re-raises
+      # SIGTSTP with SIG_DFL from inside its own SIGTSTP handler -- the
+      # job-control idiom the backend's onSuspend uses -- so the child never
+      # stops and this case cannot be observed there. Natively it stops, and
+      # this case runs in every other job (all memory managers, modes and
+      # threading settings on Linux and macOS, the sanitizer cells).
+      # Defect, upstream report and removal condition:
+      # isonim-pm issues/2026-11-16-valgrind-does-not-stop-a-process-that-re-raises-sigtstp-from-its-handler.md
+      # Remove this exemption once the Valgrind the dev shell provides
+      # carries the upstream fix.
+      skip()
+    else:
+      var (pid, master, seen) = spawnChild("stop")
+      discard posix.kill(pid, SIGTSTP)
+      var status: cint
+      # The child STOPS (WUNTRACED reports it) — after writing the restore.
+      var stopped = waitReading(pid, master, status, WUNTRACED)
+      check WIFSTOPPED(status)
+      stopped.add readAll(master, 300)
+      check stopped.contains(Sequence)
+      check not stopped.contains(Resume)
+      # Continued: raw mode back, the application's modes back, and the
+      # application told (`takeResumed`).
+      discard posix.kill(pid, SIGCONT)
+      var back = ""
+      for i in 0 ..< 40:
+        back.add readAll(master, 100)
+        if back.contains("RESUMED"): break
+      checkpoint("after SIGCONT: " & back.escape)
+      check back.contains(Resume)
+      check back.contains("RESUMED RAW")
+      # And it still restores on the way out.
+      discard posix.kill(pid, SIGTERM)
+      var last = waitReading(pid, master, status)
+      last.add readAll(master, 300)
+      check last.contains(Sequence)
+      discard close(master)
+      discard seen
