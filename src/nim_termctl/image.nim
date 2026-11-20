@@ -1,9 +1,7 @@
 ## nim_termctl/image.nim - terminal image emission.
 ##
-## Capability detection + protocol dispatch. Pixel encoders (Sixel,
-## Kitty graphics, iTerm2) are *deferred* in this pass - the load-bearing
-## L3 core ships first; the encoders land in a follow-up commit so the
-## review agent has a clean reviewable surface.
+## Capability detection + protocol dispatch, and the encoders: Kitty graphics
+## and iTerm2 (PNG passthrough) and Sixel (RGBA pixels, `nim_termctl/sixel`).
 ##
 ## What ships now:
 ##   * `Image` value `object` with raw bytes + format tag.
@@ -16,6 +14,9 @@
 ##     deferred-feature error rather than silent missing output.
 
 import std/[os, base64, strutils]
+
+import ./sixel
+export sixel
 
 type
   ImageFormat* = enum
@@ -137,13 +138,23 @@ proc emitKittyChunked*(img: Image; id: uint32 = 0): string =
   result = buf
 
 # ---------------------------------------------------------------------------
-# Sixel - DEFERRED.
+# Sixel.
 # ---------------------------------------------------------------------------
 
 proc emitSixel*(img: Image): string =
-  raise newException(ImageNotImplementedDefer,
-    "Sixel encoder (~600 LOC pure Nim - Floyd-Steinberg dithering + " &
-    "256-color quantization) is deferred to a follow-up commit")
+  ## The Sixel escape for an RGBA image (`sfRgba` with its `width` and
+  ## `height`), through `nim_termctl/sixel.encodeSixel`: up to 256 colour
+  ## registers, median cut and Floyd-Steinberg dithering above that.
+  ## Encoded sources (PNG, JPEG, GIF) must be decoded by the caller first:
+  ## a terminal decodes them for Kitty and iTerm2, but Sixel carries pixels.
+  if img.format != sfRgba:
+    raise newException(ImageError,
+      "Sixel: the image must be RGBA pixels (sfRgba); decode " & $img.format &
+      " first")
+  try:
+    encodeSixel(img.bytes, img.width, img.height)
+  except SixelError as e:
+    raise newException(ImageError, e.msg)
 
 # ---------------------------------------------------------------------------
 # Public emission API.
