@@ -146,6 +146,11 @@ const portableTestSpecs: seq[TermctlTestSpec] = @[
     binary: "build/test-bin/test_termctl_panic_safe_restore"),
   TermctlTestSpec(source: "tests/test_termctl_sigwinch_resize.nim",
     binary: "build/test-bin/test_termctl_sigwinch_resize"),
+  # The restore runs on a thread that did not turn the modes on: a forked
+  # child on a real pty whose worker takes the signal (POSIX), the restore
+  # state read from a worker thread in a private console (Windows).
+  TermctlTestSpec(source: "tests/test_termctl_restore_from_any_thread.nim",
+    binary: "build/test-bin/test_termctl_restore_from_any_thread"),
 ]
 
 const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
