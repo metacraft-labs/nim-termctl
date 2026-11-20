@@ -122,32 +122,42 @@ proc raiseOSError(ctx: string) {.noreturn.} =
 # `gActiveTty` holds the FD we last enabled raw mode on (typically
 # STDIN_FILENO). `gSavedTermios` holds the original attributes.
 # `gNeedsRestore` is the gate that disables double-restore.
+#
+# Process-wide, NOT `{.threadvar.}`, and so is every other variable a signal
+# handler reads (the Ctrl-C callback, the SIGWINCH pipe). A signal sent to the
+# process (`kill`, a hangup) is delivered to whichever of its threads does not
+# block it, so in an application with worker threads the handler runs on a
+# worker some of the time. The terminal belongs to the process: kept per
+# thread, a handler on a worker read "nothing to restore", wrote nothing, and
+# the process died with the terminal left in the alternate screen, raw mode
+# and the Kitty keyboard protocol
+# (tests/test_termctl_restore_from_any_thread.nim).
 
 var
-  gActiveTty {.threadvar.}: cint
-  gSavedTermios {.threadvar.}: Termios
-  gNeedsRestore {.threadvar.}: bool
-  gAltScreenActive {.threadvar.}: bool
-  gMouseActive {.threadvar.}: bool
-  gPasteActive {.threadvar.}: bool
-  gFocusActive {.threadvar.}: bool
-  gKeyReportingActive {.threadvar.}: int
+  gActiveTty: cint
+  gSavedTermios: Termios
+  gNeedsRestore: bool
+  gAltScreenActive: bool
+  gMouseActive: bool
+  gPasteActive: bool
+  gFocusActive: bool
+  gKeyReportingActive: int
     ## Which extended key reporting `enableKeyReporting` turned on: 0 none,
     ## 1 Kitty, 2 `modifyOtherKeys`. An int and not a string so the signal
     ## handler reads a word and writes a constant, allocating and freeing
     ## nothing.
-  gAtexitInstalled {.threadvar.}: bool
-  gSigHandlersInstalled {.threadvar.}: bool
+  gAtexitInstalled: bool
+  gSigHandlersInstalled: bool
 
 const
   ExtraRestoreCapacity* = 512
     ## Bytes an application may add to the restore (`setExtraRestore`).
 
 var
-  gRawTermios {.threadvar.}: Termios
+  gRawTermios: Termios
     ## The raw attributes `enableRawMode` set — put back after a stop
     ## (SIGTSTP) is continued.
-  gResumed {.threadvar.}: bool
+  gResumed: bool
     ## A stop was continued since `takeResumed` last answered.
   gExtraResume: array[ExtraRestoreCapacity, char]
   gExtraResumeLen: int
@@ -293,8 +303,8 @@ type
     ## a token into a self-pipe.
 
 var
-  gCtrlCallback {.threadvar.}: CtrlCallback
-  gCtrlEventReceived {.threadvar.}: bool
+  gCtrlCallback: CtrlCallback
+  gCtrlEventReceived: bool
 
 proc onSignal(sig: cint) {.noconv.} =
   ## Signal handler. Restore terminal state, dispatch the user's Ctrl-C
@@ -726,9 +736,9 @@ proc terminalSize*(fd: cint = STDOUT_FILENO): tuple[cols, rows: int] =
 # might allocate or be interrupted again. The reader does the real work.
 
 var
-  gWinchPipeR {.threadvar.}: cint
-  gWinchPipeW {.threadvar.}: cint
-  gWinchHandlerInstalled {.threadvar.}: bool
+  gWinchPipeR: cint
+  gWinchPipeW: cint
+  gWinchHandlerInstalled: bool
 
 proc onWinch(sig: cint) {.noconv.} =
   if gWinchPipeW >= 0:
