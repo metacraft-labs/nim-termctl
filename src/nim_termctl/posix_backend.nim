@@ -306,6 +306,18 @@ var
   gCtrlCallback: CtrlCallback
   gCtrlEventReceived: bool
 
+proc raiseHere(sig: cint): cint {.importc: "raise", header: "<signal.h>".}
+  ## `raise(3)`: the signal is sent to THIS thread, not to the process.
+  ## Both handlers below re-raise with it. The handler runs on whichever
+  ## thread the kernel picked, and that thread is the one known to take the
+  ## signal once the handler returns. A `kill(getpid(), sig)` is aimed at the
+  ## process, and XNU picks its thread at send time. When every thread blocks
+  ## the signal at that moment (the handler's own thread does while the
+  ## handler runs), it can choose one that keeps it blocked for good. The
+  ## process then survived the signal it was meant to die of
+  ## (tests/test_termctl_restore_from_any_thread.nim, on macOS).
+  ## Async-signal-safe.
+
 proc onSignal(sig: cint) {.noconv.} =
   ## Signal handler. Restore terminal state, dispatch the user's Ctrl-C
   ## callback if one is registered, then re-raise the signal with the
@@ -324,7 +336,7 @@ proc onSignal(sig: cint) {.noconv.} =
   discard sigemptyset(sa.sa_mask)
   sa.sa_flags = 0
   discard sigaction(sig, sa, nil)
-  discard kill(getpid(), sig)
+  discard raiseHere(sig)
 
 let FatalSignals = [SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT]
   ## A CRASH. The process is dying either way; what is ours to do is give the
@@ -357,7 +369,7 @@ proc onFatalSignal(sig: cint) {.noconv.} =
   for i, fatal in FatalSignals:
     if fatal == sig:
       discard sigaction(sig, gPreviousFatal[i], nil)
-  discard kill(getpid(), sig)
+  discard raiseHere(sig)
 
 proc onSuspend(sig: cint) {.noconv.}
   ## SIGTSTP — defined beside the SIGWINCH self-pipe it nudges.
