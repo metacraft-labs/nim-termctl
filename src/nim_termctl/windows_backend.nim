@@ -229,10 +229,17 @@ type
 # Module-level state for restoration.
 # ---------------------------------------------------------------------------
 
+# Process-wide, NOT `{.threadvar.}`, for the reason the POSIX backend gives:
+# the console belongs to the process, and the code that reads this state is
+# not always on the thread that set it. A console control handler (Ctrl-C,
+# Ctrl-Break, close) always runs on a NEW thread the system creates for it,
+# and an application's shutdown can run on a worker. Kept per thread, every
+# such thread read "nothing to restore" and an empty extra restore
+# (tests/test_termctl_restore_from_any_thread.nim).
 var
-  gSavedInputMode {.threadvar.}: DWORD
-  gSavedOutputMode {.threadvar.}: DWORD
-  gNeedsRestore {.threadvar.}: bool
+  gSavedInputMode: DWORD
+  gSavedOutputMode: DWORD
+  gNeedsRestore: bool
 
 # ---------------------------------------------------------------------------
 # RawMode handle
@@ -594,15 +601,24 @@ const
 
 const ExtraRestoreCapacity* = 512
 
-var gExtraRestore {.threadvar.}: string
+var
+  gExtraRestore: array[ExtraRestoreCapacity, char]
+  gExtraRestoreLen: int
+    ## Process-wide like the state above, and a fixed buffer rather than a
+    ## `string` so no thread holds a reference into another thread's heap.
 
 proc setExtraRestore*(sequence: string): bool =
   if sequence.len > ExtraRestoreCapacity:
     return false
-  gExtraRestore = sequence
+  for i, c in sequence:
+    gExtraRestore[i] = c
+  gExtraRestoreLen = sequence.len
   true
 
-proc extraRestore*(): string = gExtraRestore
+proc extraRestore*(): string =
+  result = newString(gExtraRestoreLen)
+  for i in 0 ..< gExtraRestoreLen:
+    result[i] = gExtraRestore[i]
 
 proc writeExtraRestore*(fd: cint = STDOUT_FILENO) =
-  writeStringRaw(fd, gExtraRestore)
+  writeStringRaw(fd, extraRestore())
