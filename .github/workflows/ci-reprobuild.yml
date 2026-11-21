@@ -81,19 +81,14 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
 
-      # `repro test` runs BEFORE `repro build`. On Linux and Windows a
-      # `repro test` that follows a `repro build` on the same state aborts
-      # with "content fingerprint missing" before any test runs (repro 0.2.27
-      # to 0.2.29; reprobuild-pm issues/2026-11-21-repro-test-after-repro-
-      # build-raises-content-fingerprint-missing.md). Both steps still run,
-      # and a build after the tests passes. Put them back in order once a
-      # repro release carries the fix.
-      - name: repro test
-        run: dev-exec repro test
-
-      - name: repro build
-        run: dev-exec repro build
-
+      # THE PLAIN-NIM CROSS-CHECK RUNS FIRST, the repro steps after it, and
+      # `repro test` has a step timeout. On Windows `repro test` deadlocked
+      # in RunQuota: one test build was granted the host's whole CPU budget
+      # and an interface extract waited behind it until the 6-hour job limit,
+      # so no test result was reported at all (reprobuild-pm issues/2026-11-
+      # 21-runquota-grants-one-test-build-the-whole-budget-and-an-interface-
+      # extract-waits-behind-it-for-six-hours.md). Run first, the cross-check
+      # reports every suite's result whatever the repro steps then do.
       - name: just build (cross-check)
         run: dev-exec just build
 
@@ -102,6 +97,23 @@ jobs:
       # ownership probes (real console events in isolated children).
       - name: just test (cross-check)
         run: dev-exec just ${{ matrix.just-test }}
+
+      # `repro test` runs BEFORE `repro build`. On Linux and Windows a
+      # `repro test` that follows a `repro build` on the same state aborts
+      # with "content fingerprint missing" before any test runs (repro 0.2.27
+      # to 0.2.29; reprobuild-pm issues/2026-11-21-repro-test-after-repro-
+      # build-raises-content-fingerprint-missing.md). Both steps still run,
+      # and a build after the tests passes.
+      #
+      # RESTORE THE ORIGINAL ORDER once repro releases carry both fixes:
+      # `repro build`, `repro test`, then the two cross-checks, and no
+      # `timeout-minutes` on `repro test`.
+      - name: repro test
+        timeout-minutes: 90
+        run: dev-exec repro test
+
+      - name: repro build
+        run: dev-exec repro build
 
       # Per-action stdio captures and the failure report. Hidden files must be
       # included explicitly: actions/upload-artifact@v4 skips any path whose
