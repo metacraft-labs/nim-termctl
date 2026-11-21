@@ -81,11 +81,18 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
 
-      - name: repro build
-        run: dev-exec repro build
-
+      # `repro test` runs BEFORE `repro build`. On Linux and Windows a
+      # `repro test` that follows a `repro build` on the same state aborts
+      # with "content fingerprint missing" before any test runs (repro 0.2.27
+      # to 0.2.29; reprobuild-pm issues/2026-11-21-repro-test-after-repro-
+      # build-raises-content-fingerprint-missing.md). Both steps still run,
+      # and a build after the tests passes. Put them back in order once a
+      # repro release carries the fix.
       - name: repro test
         run: dev-exec repro test
+
+      - name: repro build
+        run: dev-exec repro build
 
       - name: just build (cross-check)
         run: dev-exec just build
