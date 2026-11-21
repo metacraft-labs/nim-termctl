@@ -134,7 +134,9 @@ proc raiseOSError(ctx: string) {.noreturn.} =
 # (tests/test_termctl_restore_from_any_thread.nim).
 
 var
-  gActiveTty: cint
+  gActiveTty: cint = -1
+    ## -1 until `enableRawMode`; the restore and the SIGCONT path test
+    ## `>= 0`, and descriptor 0 is a real descriptor (standard input).
   gSavedTermios: Termios
   gNeedsRestore: bool
   gAltScreenActive: bool
@@ -748,8 +750,14 @@ proc terminalSize*(fd: cint = STDOUT_FILENO): tuple[cols, rows: int] =
 # might allocate or be interrupted again. The reader does the real work.
 
 var
-  gWinchPipeR: cint
-  gWinchPipeW: cint
+  gWinchPipeR: cint = -1
+  gWinchPipeW: cint = -1
+    ## Process-wide (see the note above `gActiveTty`): the handler runs on
+    ## whichever thread takes SIGWINCH. -1 until `installWinchHandler`, as
+    ## `winchPipeReadFd` documents. A zero here is standard input, which the
+    ## handler would write to and `drainWinchPipe` would read from — the
+    ## state a per-thread copy had on every thread but the installer's.
+    ## Both are set before `sigaction` installs the handler.
   gWinchHandlerInstalled: bool
 
 proc onWinch(sig: cint) {.noconv.} =

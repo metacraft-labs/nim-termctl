@@ -164,6 +164,9 @@ const posixOnlyTestSpecs: seq[TermctlTestSpec] = @[
     binary: "build/test-bin/test_termctl_extra_restore"),
   TermctlTestSpec(source: "tests/test_termctl_no_leaks.nim",
     binary: "build/test-bin/test_termctl_no_leaks"),
+  # SIGWINCH taken by a worker thread still reaches the self-pipe.
+  TermctlTestSpec(source: "tests/test_termctl_sigwinch_any_thread.nim",
+    binary: "build/test-bin/test_termctl_sigwinch_any_thread"),
 ]
 
 package nim_termctl:
