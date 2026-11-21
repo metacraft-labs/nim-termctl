@@ -1,7 +1,13 @@
 ## Included after CtrlCallback in windows_backend.nim. Internal native state
 ## never owns a Nim closure; only installer-thread value owners do.
-import std/[os, exitprocs]
-const ctrlOwnerHeader = currentSourcePath().parentDir / "ctrl_owner.h"
+import std/[os, exitprocs, strutils]
+# The C compiler is handed this path, so it is spelled with "/" throughout.
+# In compile-time code `currentSourcePath()` and `/` follow the TARGET's
+# conventions: a Windows cross-build on a Linux host got
+# `\tmp\...\nim_termctl\ctrl_owner.h`, which mingw on Linux cannot open. "/" is
+# accepted by every C compiler on Windows as well.
+const ctrlOwnerHeader =
+  (currentSourcePath().parentDir & "/ctrl_owner.h").replace('\\', '/')
 {.compile: "ctrl_owner.c".}
 type
   NativeCtrlOwner {.importc: "TcCtrlOwner", header: ctrlOwnerHeader, incompleteStruct.} = object

@@ -280,6 +280,16 @@ check-windows-cross:
         --nimcache:{{nimcache}}/$(dirname $t)/$(basename $t .nim)_check \
         $t 2>&1 | tee -a test-logs/check-windows-cross.log; \
     done
+    # `nim check` stops before C generation, so it cannot see a header path
+    # the C compiler will be handed. Generate the Windows C (no compiler is
+    # run) and refuse an `#include` whose last separator is a backslash: on
+    # a Linux host that is a path joined with the target's separator at
+    # compile time, which mingw on Linux cannot open.
+    @echo "[windows-cross-check] generated C include paths"
+    nim c {{nim-flags}} {{src-paths}} --os:windows --cpu:amd64 --mm:orc \
+      --threads:on --compileOnly \
+      --nimcache:{{nimcache}}/src/nim_termctl_windows_c src/nim_termctl.nim
+    ! grep -rn '#include "[^"]*\\[^"/\\]*"' {{nimcache}}/src/nim_termctl_windows_c
 
 # Native Windows lane - run on `windows-latest` in CI. Builds and runs
 # the Linux-portable test list AND the Windows-only signal tests.
