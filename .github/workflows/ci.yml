@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, dev, stable]
   pull_request:
+    # Named bases: an unfiltered trigger also runs on pull requests into `agents`,
+    # which runs no CI (branching policy, "`agents` Has No CI").
+    branches: [main, dev, stable]
 
 # Cancel superseded PR runs only: a new push to a PR makes its previous run
 # moot, and stale runs otherwise hold scarce self-hosted runners. Every other
